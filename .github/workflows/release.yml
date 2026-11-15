@@ -1,0 +1,47 @@
+# Сборка SdelkiAmoCRM.exe и публикация в Releases.
+# Запуск: отправить тег вида v1.0.1 (git tag v1.0.1 && git push origin v1.0.1)
+name: Release exe
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Сборка exe
+        run: pyinstaller --noconfirm --clean SdelkiAmoCRM.spec
+
+      - name: Проверка, что exe собран
+        shell: pwsh
+        run: |
+          $exe = Get-Item dist/SdelkiAmoCRM.exe
+          "Размер: {0:N1} МБ" -f ($exe.Length / 1MB)
+
+      - name: Публикация релиза
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SdelkiAmoCRM.exe
+          generate_release_notes: true
+
+      - name: Exe как артефакт (ручной запуск)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SdelkiAmoCRM
+          path: dist/SdelkiAmoCRM.exe

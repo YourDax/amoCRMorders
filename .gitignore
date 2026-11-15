@@ -1,0 +1,15 @@
+# окружение и сборка
+.venv/
+__pycache__/
+build/
+dist/
+
+# данные пользователя — не публикуем (ФИО, телефоны, вход в amoCRM)
+browser-profile/
+logs/
+uploads/
+progress.json
+*.xlsx
+
+# локальные настройки инструментов
+.claude/

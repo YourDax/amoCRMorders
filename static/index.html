@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сделки в amoCRM</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6fed'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f4f6f9; --card:#fff; --text:#1d2330; --muted:#6b7385; --line:#e3e7ee;
+  --accent:#2f6fed; --accent-2:#e9f0fe; --ok:#1f9d55; --ok-bg:#e6f6ec; --err:#d64545; --err-bg:#fdecec;
+  --warn:#b7791f; --warn-bg:#fdf6e3; --input:#fff;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#141a24; --card:#1c2431; --text:#e6e9ef; --muted:#9aa3b5; --line:#2c3646;
+    --accent:#5b8ff9; --accent-2:#233453; --ok:#4cc38a; --ok-bg:#183326; --err:#f07171; --err-bg:#3a1f22;
+    --warn:#e3b341; --warn-bg:#3a321b; --input:#151c27; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:12px 24px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header h1{font-size:17px;margin:0;font-weight:650}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;font-size:12px;background:var(--line);color:var(--muted);border:none;cursor:pointer}
+.pill.on{background:var(--ok-bg);color:var(--ok);cursor:default}
+.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+main{max-width:1440px;margin:0 auto;padding:18px 24px 40px;display:grid;gap:14px}
+main>*{min-width:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);padding:8px 14px;border-radius:8px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button.big{padding:11px 22px;font-size:15px}
+button.danger{color:var(--err);border-color:var(--err)}
+button.link{border:none;background:none;color:var(--accent);padding:4px 6px}
+button:disabled{opacity:.45;cursor:not-allowed}
+select,.meta input{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)}
+
+/* загрузка */
+#drop{border:2px dashed var(--line);border-radius:12px;padding:46px 20px;text-align:center;color:var(--muted);cursor:pointer;transition:.15s}
+#drop.over,#drop:hover{border-color:var(--accent);background:var(--accent-2);color:var(--text)}
+#drop .big-t{font-size:17px;color:var(--text);font-weight:600;margin-bottom:4px}
+body.loaded #drop{padding:10px;font-size:13px}
+body.loaded #drop .big-t{font-size:13px;display:inline;margin-right:6px}
+.meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;margin-top:12px;color:var(--muted)}
+.meta b{color:var(--text)}
+.meta input{width:150px;padding:5px 8px}
+.warn{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:8px 12px;margin-top:10px;font-size:13px}
+
+/* панель действия */
+.action{display:flex;flex-wrap:wrap;align-items:center;gap:12px 18px}
+.action label{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+#progress{display:none;margin-top:14px}
+#progress.show{display:block}
+.bar{height:8px;background:var(--line);border-radius:999px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
+.ptext{display:flex;gap:12px;align-items:center;margin-top:8px;font-size:13px;color:var(--muted)}
+.ptext b{color:var(--text)}
+#lastLog{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#waiting{display:none;margin-top:12px;background:var(--warn-bg);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;align-items:center;gap:12px}
+#waiting.show{display:flex}
+#waiting span{flex:1}
+
+/* таблица */
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:1050px}
+th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap;padding-top:2px}
+th:nth-child(3),td:nth-child(3),th:nth-child(5),td:nth-child(5),th:nth-child(7),td:nth-child(7){border-left:1px solid var(--line);padding-left:10px}
+td input[type=text]{width:100%;padding:6px 8px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--text);font:inherit}
+td input[type=text]:hover{border-color:var(--line)}
+td input[type=text]:focus{outline:none;border-color:var(--accent);background:var(--input)}
+td input.bad{border-color:var(--warn);background:var(--warn-bg)}
+td.name input{font-weight:600}
+td.info{font-size:12px;color:var(--muted);max-width:190px}
+td.info div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+tr.done td{opacity:.55}
+tr.done td.status{opacity:1}
+tr.off td:not(:first-child):not(.status):not(:last-child){opacity:.5}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;white-space:nowrap}
+.b-ok{background:var(--ok-bg);color:var(--ok)} .b-err{background:var(--err-bg);color:var(--err)}
+.b-work{background:var(--accent-2);color:var(--accent)} .b-q{background:var(--line);color:var(--muted)}
+.b-part,.b-ref{background:var(--warn-bg);color:var(--warn)}
+td.status{min-width:120px}
+td.status a{color:var(--accent);font-size:12px;margin-left:4px}
+td.status .err{display:block;color:var(--err);font-size:12px;max-width:240px}
+.cell{display:flex;align-items:center;gap:2px}
+button.x{border:none;background:transparent;color:var(--muted);padding:4px 7px;border-radius:6px;font-size:15px;line-height:1}
+button.x:hover{background:var(--err-bg);color:var(--err)}
+.below{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-top:10px;color:var(--muted);font-size:13px}
+.empty{color:var(--muted);text-align:center;padding:30px}
+.hidden{display:none !important}
+details summary{cursor:pointer;color:var(--muted);font-size:13px}
+#log{font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:10px;height:240px;overflow:auto;white-space:pre-wrap;margin:10px 0 0}
+@media (max-width:700px){ header{flex-wrap:wrap;padding:10px 16px} main{padding:14px 16px} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Сделки в amoCRM</h1>
+  <button id="conn" class="pill" title="Открыть окно amoCRM и войти">amoCRM: войти</button>
+  <div class="spacer"></div>
+  <span id="ver" style="color:var(--muted);font-size:12px"></span>
+</header>
+
+<main>
+  <!-- 1. файл -->
+  <section class="card">
+    <div id="drop"><div class="big-t">Перетащите сюда отчёт .xlsx</div>или нажмите, чтобы выбрать файл</div>
+    <input type="file" id="file" accept=".xlsx" hidden>
+    <div class="meta hidden" id="meta"></div>
+    <div id="warnings"></div>
+  </section>
+
+  <!-- 2. действие -->
+  <section class="card hidden" id="actionCard">
+    <div class="action">
+      <label>Воронка <select id="pipeline"></select></label>
+      <label title="Перед каждым «Сохранить» бот остановится, чтобы вы проверили форму"><input type="checkbox" id="step"> Проверять перед сохранением</label>
+      <div class="spacer"></div>
+      <button class="danger hidden" id="btnStop">Стоп</button>
+      <button class="primary big" id="btnRun" disabled>Создать сделки</button>
+    </div>
+    <div id="waiting"><span id="waitText"></span><button class="primary" id="btnContinue">Продолжить</button></div>
+    <div id="progress">
+      <div class="bar"><i id="barFill"></i></div>
+      <div class="ptext"><span id="pCount"></span><span id="lastLog"></span></div>
+    </div>
+  </section>
+
+  <!-- 3. таблица -->
+  <section class="card hidden" id="tableCard">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th><input type="checkbox" id="all" title="Выбрать все"></th>
+          <th>Название сделки</th>
+          <th>ФИО КР</th><th>Телефон КР</th><th>ФИО РК</th><th>Телефон РК</th>
+          <th>Доп. информация</th><th>Статус</th><th></th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="below">
+      <span>Ячейки можно править. «×» у телефона — убрать контакт, 🗑 — убрать строку.</span>
+      <div class="spacer"></div>
+      <button class="link hidden" id="btnRetry">Повторить ошибочные</button>
+      <button class="link" id="btnRestore">Вернуть как в файле</button>
+      <button class="link" id="btnClear">Очистить</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <details id="logBox"><summary>Подробный журнал</summary><pre id="log"></pre></details>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const clone = x => JSON.parse(JSON.stringify(x));
+const store = {
+  get(k, d=""){ try{ return localStorage.getItem(k) ?? d; }catch(e){ return d; } },
+  set(k, v){ try{ localStorage.setItem(k, v); }catch(e){} },
+};
+
+let deals = [], original = [], school = "";
+let S = {rows:{}, running:false, log:[]};
+const byId = id => deals.find(x => x.id === id);
+const isDone = d => d.done && d.doneStatus !== "partial";
+
+async function post(url, body){
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body||{})});
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) alert(j.error || "Ошибка");
+  return r.ok;
+}
+
+// ---------- проверка данных ----------
+const PHONE_RE = /^\+7\d{10}(\s*\(.+\))?$/;
+function problems(d){
+  const p = {};
+  if(!d.name.trim()) p.name = "Пустое название";
+  for(const who of ["kr","rk"]){
+    const c = d[who], label = who.toUpperCase() === "KR" ? "КР" : "РК";
+    if(c.name.trim() && !c.phone.trim()) p[who+".phone"] = `Нет телефона ${label}`;
+    if(c.phone.trim() && !PHONE_RE.test(c.phone.trim())) p[who+".phone"] = `Телефон ${label} не похож на +7XXXXXXXXXX`;
+    if(!c.name.trim() && c.phone.trim()) p[who+".name"] = `Нет ФИО ${label}`;
+  }
+  if(!d.kr.name.trim() && !d.kr.phone.trim()) p["kr.name"] = "Нет КР";
+  return p;
+}
+
+// ---------- загрузка файла ----------
+const drop = $("#drop"), fileInp = $("#file");
+drop.onclick = () => fileInp.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
+fileInp.onchange = () => fileInp.files[0] && upload(fileInp.files[0]);
+// файл можно бросить в любое место окна
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => { e.preventDefault(); if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); });
+
+async function upload(f){
+  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
+  if(!/\.xlsx$/i.test(f.name)){ alert("Нужен файл .xlsx"); return; }
+  const fd = new FormData(); fd.append("file", f);
+  const r = await fetch("/api/parse", {method:"POST", body: fd});
+  const j = await r.json();
+  fileInp.value = "";
+  if(!r.ok){ alert(j.error); return; }
+  j.deals.forEach(d => d.sel = !isDone(d) && !d.refused);
+  original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
+  document.body.classList.add("loaded");
+  $("#drop").innerHTML = '<span class="big-t">Другой файл</span> — перетащите или нажмите';
+  const refused = deals.filter(d => d.refused).length, done = deals.filter(isDone).length;
+  $("#meta").classList.remove("hidden");
+  $("#meta").innerHTML = `<span>📄 <b>${esc(j.file)}</b></span>
+    <label>Школа <input id="school" value="${esc(school)}" title="Поменяет школу во всех названиях"></label>
+    <span>Классов: <b>${deals.length}</b></span>
+    ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
+    ${refused ? `<span>Похоже на отказ: <b>${refused}</b> (не отмечены)</span>` : ""}`;
+  $("#school").onchange = e => renameSchool(e.target.value.trim());
+  $("#warnings").innerHTML = j.warnings.length ? `<div class="warn">${j.warnings.map(esc).join("<br>")}</div>` : "";
+  $("#actionCard").classList.remove("hidden"); $("#tableCard").classList.remove("hidden");
+  renderRows();
+}
+
+function renameSchool(newSchool){
+  for(const d of deals){
+    if(d.name === `${d.klass} ${school}`.trim()) d.name = `${d.klass} ${newSchool}`.trim();
+  }
+  school = newSchool; renderRows();
+}
+
+// ---------- таблица ----------
+function renderRows(){
+  if(!deals.length){
+    $("#rows").innerHTML = `<tr><td colspan="9" class="empty">${original.length ? "Список пуст — «Вернуть как в файле» восстановит строки" : "Нет строк"}</td></tr>`;
+    updateUI(); return;
+  }
+  $("#rows").innerHTML = deals.map(d => {
+    const inp = (f, v) => `<input type="text" data-f="${f}" value="${esc(v)}">`;
+    return `<tr data-id="${d.id}">
+      <td><input type="checkbox" class="sel" ${d.sel?'checked':''}></td>
+      <td class="name" title="${esc(d.sheet)}, строка ${d.row}">${inp("name", d.name)}</td>
+      <td>${inp("kr.name", d.kr.name)}</td>
+      <td><div class="cell">${inp("kr.phone", d.kr.phone)}<button class="x" data-clear="kr" title="Убрать КР из этой сделки">×</button></div></td>
+      <td>${inp("rk.name", d.rk.name)}</td>
+      <td><div class="cell">${inp("rk.phone", d.rk.phone)}<button class="x" data-clear="rk" title="Убрать РК из этой сделки">×</button></div></td>
+      <td class="info" title="${esc(d.info)}">${d.refused ? '<span class="badge b-ref">отказ?</span> ' : ''}<div>${esc(d.info)}</div></td>
+      <td class="status"></td>
+      <td><button class="x" data-del title="Убрать строку из списка">🗑</button></td>
+    </tr>`;
+  }).join("");
+  deals.forEach(markProblems);
+  paintStatuses(); updateUI();
+}
+
+function markProblems(d){
+  const tr = document.querySelector(`tr[data-id="${d.id}"]`); if(!tr) return;
+  const p = problems(d);
+  tr.querySelectorAll("input[type=text]").forEach(i => {
+    const msg = p[i.dataset.f];
+    i.classList.toggle("bad", !!msg);
+    i.title = msg || "";
+  });
+  tr.classList.toggle("off", !d.sel);
+}
+
+$("#rows").addEventListener("input", e => {
+  const inp = e.target; if(!inp.dataset.f) return;
+  const d = byId(inp.closest("tr").dataset.id);
+  const [a,b] = inp.dataset.f.split(".");
+  if(b) d[a][b] = inp.value; else d[a] = inp.value;
+  markProblems(d); updateUI();
+});
+$("#rows").addEventListener("change", e => {
+  if(!e.target.classList.contains("sel")) return;
+  const d = byId(e.target.closest("tr").dataset.id); d.sel = e.target.checked;
+  markProblems(d); updateUI();
+});
+$("#rows").addEventListener("click", async e => {
+  const forget = e.target.dataset && e.target.dataset.forget;
+  if(forget){
+    e.preventDefault();
+    if(!confirm(`Создать «${forget}» ещё раз? В amoCRM появится вторая такая сделка.`)) return;
+    if(!await post("/api/forget", {name: forget})) return;
+    for(const list of [deals, original]){ const x = list.find(x => x.name === forget); if(x){ x.done = null; x.doneStatus = null; x.sel = true; } }
+    renderRows(); return;
+  }
+  const btn = e.target.closest("button.x"); if(!btn) return;
+  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
+  const tr = btn.closest("tr"), d = byId(tr.dataset.id);
+  if(btn.dataset.clear){
+    d[btn.dataset.clear] = {name:"", phone:""};
+    tr.querySelector(`[data-f="${btn.dataset.clear}.name"]`).value = "";
+    tr.querySelector(`[data-f="${btn.dataset.clear}.phone"]`).value = "";
+    markProblems(d); updateUI();
+  } else if(btn.hasAttribute("data-del")){
+    deals = deals.filter(x => x !== d); renderRows();
+  }
+});
+
+$("#all").onchange = e => {
+  deals.forEach(d => { if(!isDone(d)) d.sel = e.target.checked; });
+  renderRows();
+};
+$("#btnRestore").onclick = () => {
+  if(S.running) return;
+  if(!confirm("Вернуть все строки и значения как в файле? Ваши правки пропадут.")) return;
+  deals = clone(original); renderRows();
+};
+$("#btnClear").onclick = () => {
+  if(S.running) return;
+  if(!confirm("Очистить список? В amoCRM ничего не удалится.")) return;
+  deals = []; original = [];
+  document.body.classList.remove("loaded");
+  $("#drop").innerHTML = '<div class="big-t">Перетащите сюда отчёт .xlsx</div>или нажмите, чтобы выбрать файл';
+  ["#meta","#actionCard","#tableCard"].forEach(s => $(s).classList.add("hidden"));
+  $("#warnings").innerHTML = "";
+};
+
+function paintStatuses(){
+  for(const d of deals){
+    const tr = document.querySelector(`tr[data-id="${d.id}"]`); if(!tr) continue;
+    const s = S.rows[d.id] || {};
+    if((s.status === "ok" || s.status === "skip") && !d._final){
+      d._final = true; d.sel = false; d.done = s.url; d.doneStatus = "ok";
+      tr.querySelector(".sel").checked = false; markProblems(d);
+    }
+    let html = "";
+    const url = s.url || d.done;
+    if(s.status === "ok") html = '<span class="badge b-ok">✓ создана</span>';
+    else if(s.status === "skip") html = '<span class="badge b-ok">уже была</span>';
+    else if(s.status === "work") html = '<span class="badge b-work">создаётся…</span>';
+    else if(s.status === "queued") html = '<span class="badge b-q">в очереди</span>';
+    else if(s.status === "error") html = `<span class="badge b-err">ошибка</span><span class="err">${esc(s.error)}</span>`;
+    else if(s.status === "partial") html = `<span class="badge b-part">не полностью</span><span class="err">${esc(s.error)}</span>`;
+    else if(d.doneStatus === "partial") html = '<span class="badge b-part">дозаполнить</span>';
+    else if(d.done) html = '<span class="badge b-ok">уже создана</span>';
+    if(url) html += ` <a href="${esc(url)}" target="_blank">открыть</a>`;
+    if(isDone(d) && !s.status) html += ` <a href="#" data-forget="${esc(d.name)}">ещё раз</a>`;
+    const cell = tr.querySelector(".status");
+    if(cell.innerHTML !== html) cell.innerHTML = html;
+    tr.classList.toggle("done", isDone(d) || s.status === "ok" || s.status === "skip");
+  }
+}
+
+function selected(){ return deals.filter(d => d.sel); }
+function failedRows(){ return deals.filter(d => ["error","partial"].includes((S.rows[d.id]||{}).status)); }
+
+function updateUI(){
+  const sel = selected(), n = sel.length;
+  const bad = sel.filter(d => Object.keys(problems(d)).length).length;
+  const btn = $("#btnRun");
+  btn.textContent = S.running ? "Идёт создание…" : n ? `Создать ${n} ${plural(n, "сделку","сделки","сделок")}` : "Отметьте сделки";
+  btn.disabled = !n || S.running;
+  btn.title = bad ? `У ${bad} выбранных есть замечания (подсвечены жёлтым) — можно создавать и так` : "";
+  $("#btnStop").classList.toggle("hidden", !S.running);
+  $("#btnRetry").classList.toggle("hidden", S.running || !failedRows().length);
+  const selectable = deals.filter(d => !isDone(d));
+  $("#all").checked = selectable.length > 0 && selectable.every(d => d.sel);
+  document.querySelectorAll("button.x").forEach(b => b.disabled = S.running);
+}
+const plural = (n, one, few, many) => (n%10===1 && n%100!==11) ? one : (n%10>=2 && n%10<=4 && (n%100<10||n%100>=20)) ? few : many;
+
+// ---------- запуск ----------
+async function run(list){
+  const items = list.map(d => ({ id: d.id, name: d.name.trim(), contacts: [{role:"КР", ...d.kr}, {role:"РК", ...d.rk}] }));
+  if(items.some(i => !i.name)){ alert("У некоторых сделок пустое название"); return; }
+  const pipeline = $("#pipeline").value;
+  if(!pipeline){ alert("Выберите воронку"); return; }
+  const bad = list.filter(d => Object.keys(problems(d)).length).length;
+  let msg = `Создать ${items.length} ${plural(items.length,"сделку","сделки","сделок")} в воронке «${pipeline}»?`;
+  if(bad) msg += `\n\nУ ${bad} есть замечания (подсвечены жёлтым).`;
+  if(!S.loggedIn) msg += "\n\nОткроется окно amoCRM — если попросит, войдите в аккаунт.";
+  if(!confirm(msg)) return;
+  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline})) poll();
+}
+$("#btnRun").onclick = () => run(selected());
+$("#btnRetry").onclick = () => run(failedRows());
+$("#btnStop").onclick = () => post("/api/stop");
+$("#btnContinue").onclick = () => post("/api/continue");
+$("#conn").onclick = () => { if(!S.loggedIn && !S.running) post("/api/login"); };
+$("#step").checked = store.get("step") === "1";
+$("#step").onchange = e => store.set("step", e.target.checked ? "1" : "0");
+
+function fillPipelines(list){
+  const sel = $("#pipeline");
+  const key = list.join("|");
+  if(sel.dataset.key === key) return;
+  sel.dataset.key = key;
+  const saved = store.get("pipeline");
+  sel.innerHTML = list.map(p => `<option ${p===saved?"selected":""}>${esc(p)}</option>`).join("");
+}
+$("#pipeline").onchange = e => store.set("pipeline", e.target.value);
+
+// ---------- состояние с сервера ----------
+async function poll(){
+  try{
+    S = await (await fetch("/api/status")).json();
+  }catch(e){
+    $("#conn").textContent = "приложение закрыто — запустите run.bat"; $("#conn").classList.remove("on"); return;
+  }
+  fillPipelines(S.pipelines || []);
+  if(S.version) $("#ver").textContent = "версия " + S.version;
+  const conn = $("#conn");
+  conn.textContent = S.loggedIn ? "amoCRM подключена" : (S.running ? "amoCRM: вход…" : "amoCRM: войти");
+  conn.classList.toggle("on", S.loggedIn);
+  const log = $("#log"), atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
+  const txt = S.log.join("\n");
+  if(log.textContent !== txt){ log.textContent = txt; if(atBottom) log.scrollTop = log.scrollHeight; }
+  $("#waiting").classList.toggle("show", !!S.waiting);
+  $("#waitText").textContent = S.waiting || "";
+  const showP = S.running || S.total > 0;
+  $("#progress").classList.toggle("show", showP && deals.length > 0);
+  if(S.total){
+    const finished = S.doneN + S.failedN;
+    $("#barFill").style.width = Math.round(finished / S.total * 100) + "%";
+    $("#pCount").innerHTML = `Создано <b>${S.doneN}</b> из <b>${S.total}</b>` + (S.failedN ? ` · ошибок <b>${S.failedN}</b>` : "");
+    document.title = S.running ? `${finished}/${S.total} · Сделки в amoCRM` : "Сделки в amoCRM";
+  }
+  $("#lastLog").textContent = S.running ? (S.log[S.log.length-1] || "").replace(/^\S+\s+/, "") : "";
+  paintStatuses(); updateUI();
+}
+setInterval(poll, 1000); poll();
+</script>
+</body>
+</html>

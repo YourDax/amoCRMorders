@@ -1,0 +1,443 @@
+"""Приложение «Сделки в amoCRM»: создание сделок из xlsx-отчёта.
+
+Запуск: «Сделки amoCRM.exe» (или `python app.py` из исходников).
+Интерфейс — страница http://127.0.0.1:8765 в отдельном окне браузера.
+Браузер с amoCRM управляется из фонового потока (Playwright).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import sys
+import tempfile
+import threading
+import time
+import webbrowser
+from pathlib import Path
+
+import paths
+
+# В exe без консоли sys.stdout/stderr = None: print и логи Flask упали бы — пишем их в файл
+if sys.stdout is None or sys.stderr is None:
+    paths.LOG_DIR.mkdir(exist_ok=True)
+    _console = open(paths.LOG_DIR / "console.log", "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stdout or _console
+    sys.stderr = sys.stderr or _console
+
+from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
+
+from excel_reader import Contact, Deal, read_deals  # noqa: E402
+
+CONFIG = paths.load_config()
+PROGRESS = paths.PROGRESS_FILE
+UPLOADS = paths.UPLOADS_DIR
+LOG_DIR = paths.LOG_DIR
+IDLE_EXIT_SEC = 180  # окно приложения закрыто так долго (и бот не работает) — выходим
+
+app = Flask(__name__, static_folder=str(paths.STATIC_DIR))
+_last_seen = time.time()  # когда окно приложения последний раз обращалось к серверу
+
+
+# ---------------- общее состояние ----------------
+class State:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.log: list[str] = []
+        self.rows: dict[str, dict] = {}   # id строки -> {status, url, error}
+        self.running = False
+        self.logged_in = False
+        self.browser_open = False
+        self.waiting: str | None = None    # текст паузы в пошаговом режиме
+        self.stop_flag = False
+        self.continue_evt = threading.Event()
+        self.total = self.done_n = self.failed_n = 0
+        self.pipelines: list[str] = list(CONFIG.get("pipelines", []))
+
+    def add_log(self, msg: str):
+        line = f"{time.strftime('%H:%M:%S')}  {msg}"
+        with self.lock:
+            self.log.append(line)
+            self.log = self.log[-500:]
+        try:  # журнал на диске — чтобы разобраться после закрытия окна
+            LOG_DIR.mkdir(exist_ok=True)
+            with open(LOG_DIR / "app.log", "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d ") + line + "\n")
+        except OSError:
+            pass
+
+    def set_row(self, rid: str, **kw):
+        with self.lock:
+            self.rows.setdefault(rid, {}).update(kw)
+
+
+S = State()
+jobs: "queue.Queue[tuple[str, dict]]" = queue.Queue()
+
+
+def load_progress() -> dict:
+    try:
+        return json.loads(PROGRESS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+
+
+def save_progress(p: dict):
+    PROGRESS.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ---------------- фоновый поток с браузером ----------------
+def worker():
+    """Все вызовы Playwright — только в этом потоке."""
+    from amo_bot import AmoBot
+
+    bot: AmoBot | None = None
+
+    def pause(msg: str):
+        S.continue_evt.clear()
+        S.waiting = msg
+        S.add_log("⏸ " + msg)
+        while not S.continue_evt.wait(0.3):
+            if S.stop_flag:
+                S.waiting = None
+                raise RuntimeError("Остановлено пользователем")
+        S.waiting = None
+
+    def ensure_bot():
+        nonlocal bot
+        if bot is not None:
+            try:
+                _ = bot.page.url
+                bot.page.title()
+                return bot
+            except Exception:
+                try:
+                    bot.stop()
+                except Exception:
+                    pass
+                bot = None
+        S.add_log("Открываю браузер amoCRM...")
+        bot = AmoBot(CONFIG["amo_url"], slow_mo=CONFIG.get("slow_mo_ms", 150))
+        bot.log_cb = S.add_log
+        bot.ui_pause = pause
+        bot.start()
+        S.browser_open = True
+        bot.ensure_logged_in(wait_minutes=10)
+        S.logged_in = True
+        try:
+            found = bot.list_pipelines()
+            if found:
+                S.pipelines = found
+                S.add_log("Воронки в amoCRM: " + ", ".join(found))
+        except Exception:  # noqa: BLE001
+            pass
+        return bot
+
+    while True:
+        kind, payload = jobs.get()
+        try:
+            if kind == "login":
+                ensure_bot()
+            elif kind == "run":
+                run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""))
+        except Exception as e:  # noqa: BLE001
+            S.add_log(f"❌ {str(e).splitlines()[0][:300]}")
+            S.logged_in = False
+        finally:
+            S.running = False
+
+
+MAX_ERRORS_IN_ROW = 3  # столько ошибок подряд = что-то сломалось целиком, останавливаемся
+
+
+def run_deals(bot, items: list[dict], step: bool, pipeline: str):
+    progress = load_progress()
+    S.stop_flag = False
+    S.running = True
+    with S.lock:
+        S.total, S.done_n, S.failed_n = len(items), 0, 0
+    errors_in_row = 0
+    for n, it in enumerate(items, 1):
+        if S.stop_flag:
+            S.add_log("Остановлено.")
+            break
+        rid = it["id"]
+        name = it["name"].strip()
+        contacts = [Contact(role=c["role"], name=c["name"].strip(), phone=c["phone"].strip())
+                    for c in it["contacts"] if c["name"].strip() or c["phone"].strip()]
+        prev = progress.get(name, {})
+        if prev.get("status") == "ok":
+            S.set_row(rid, status="skip", url=prev.get("url"))
+            S.add_log(f"Пропуск «{name}» — уже создана")
+            with S.lock:
+                S.done_n += 1
+            continue
+        S.set_row(rid, status="work", error=None)
+        S.add_log(f"[{n}/{len(items)}] «{name}» → воронка «{pipeline}»")
+        bot.step = False
+        bot.pause_cb = bot.ui_pause if step else None
+
+        # ход создания: ссылка на сделку и сколько контактов уже сохранено (для дозаполнения)
+        state = {"url": prev.get("url") if prev.get("status") == "partial" else None,
+                 "contacts_done": prev.get("contacts_done", 0) if prev.get("status") == "partial" else 0}
+        if state["url"]:
+            S.add_log(f"   Сделка уже есть ({state['contacts_done']} контакт.), дозаполняю")
+        last_err = None
+        for attempt in (1, 2):
+            if S.stop_flag:
+                break
+            try:
+                create_or_resume(bot, name, contacts, pipeline, state)
+                last_err = None
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if "Остановлено пользователем" in str(e):
+                    break
+                shot = bot.screenshot(f"error-{name}")
+                msg = str(e).splitlines()[0][:300]
+                S.add_log(f"   ⚠ попытка {attempt}: {msg} (скриншот: {shot.name})")
+                if state["url"]:
+                    progress[name] = {"url": state["url"], "status": "partial",
+                                      "contacts_done": state["contacts_done"], "at": time.strftime("%Y-%m-%d %H:%M")}
+                    save_progress(progress)
+        if last_err is None and not S.stop_flag:
+            progress[name] = {"url": state["url"], "status": "ok", "at": time.strftime("%Y-%m-%d %H:%M")}
+            save_progress(progress)
+            S.set_row(rid, status="ok", url=state["url"])
+            S.add_log(f"   ✅ создана")
+            errors_in_row = 0
+            with S.lock:
+                S.done_n += 1
+            continue
+        err = "Остановлено" if S.stop_flag else str(last_err).splitlines()[0][:300]
+        S.set_row(rid, status="partial" if state["url"] else "error", error=err, url=state["url"])
+        if state["url"]:
+            S.add_log("   Сделка сохранена не полностью — можно нажать «Повторить ошибочные», бот дозаполнит её.")
+        with S.lock:
+            S.failed_n += 1
+        errors_in_row += 1
+        if errors_in_row >= MAX_ERRORS_IN_ROW:
+            S.add_log(f"❌ {MAX_ERRORS_IN_ROW} ошибки подряд — останавливаюсь. Посмотрите скриншоты в папке logs.")
+            break
+    with S.lock:  # строки, до которых не дошли, больше не «в очереди»
+        for it in items:
+            if S.rows.get(it["id"], {}).get("status") == "queued":
+                S.rows[it["id"]]["status"] = None
+    S.add_log(f"Готово: создано {S.done_n}, с ошибками {S.failed_n}.")
+
+
+def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, state: dict):
+    """Создаёт сделку или дозаполняет уже сохранённую (state['url'], state['contacts_done'])."""
+    if state["url"]:
+        bot.open_deal(state["url"])
+    else:
+        bot.open_new_deal(pipeline)
+        bot.fill_deal_name(name)
+    todo = contacts[state["contacts_done"]:]
+    for c in todo:
+        bot.fill_contact(c, company=name)  # «Название компании» = класс + школа
+        bot._pause(f"«{name}»: заполнен {c.role} ({c.name}). Проверьте форму и нажмите «Продолжить» — будет «Сохранить»")
+        bot.save()
+        if not state["url"]:
+            if "/leads/detail/" not in bot.page.url:
+                raise RuntimeError("После «Сохранить» сделка не создалась")
+            state["url"] = bot.deal_url()
+        state["contacts_done"] += 1
+    if not state["url"]:  # сделка без контактов
+        bot._pause(f"«{name}»: контактов нет. «Продолжить» — сохранить")
+        bot.save()
+        state["url"] = bot.deal_url()
+
+
+# ---------------- API ----------------
+@app.get("/")
+def index():
+    return send_from_directory(app.static_folder, "index.html")
+
+
+@app.post("/api/parse")
+def api_parse():
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="Файл не получен"), 400
+    UPLOADS.mkdir(exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(suffix=".xlsx", dir=UPLOADS)
+    os.close(fd)  # на Windows открытый дескриптор не даёт потом удалить файл
+    tmp = Path(tmp_name)
+    f.save(tmp)
+    try:
+        deals, warnings = read_deals(str(tmp), None, request.form.get("school", ""))
+    except Exception as e:  # noqa: BLE001
+        return jsonify(error=f"Не удалось прочитать файл: {e}"), 400
+    finally:
+        tmp.unlink(missing_ok=True)
+    progress = load_progress()
+    out = []
+    for i, d in enumerate(deals):
+        kr = next((c for c in d.contacts if c.role == "КР"), None)
+        rk = next((c for c in d.contacts if c.role == "РК"), None)
+        done = progress.get(d.name)
+        out.append({
+            "id": f"r{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass,
+            "kr": {"name": kr.name if kr else "", "phone": kr.phone_field if kr else ""},
+            "rk": {"name": rk.name if rk else "", "phone": rk.phone_field if rk else ""},
+            "info": d.info, "refused": d.refused,
+            "done": done.get("url") if done else None,
+            "doneStatus": done.get("status") if done else None,
+        })
+    with S.lock:
+        S.rows = {}
+        if not S.running:
+            S.total = S.done_n = S.failed_n = 0
+    school = deals[0].school if deals else ""
+    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename)
+
+
+@app.post("/api/login")
+def api_login():
+    if S.running:
+        return jsonify(error="Уже идёт работа"), 409
+    S.running = True
+    jobs.put(("login", {}))
+    return jsonify(ok=True)
+
+
+@app.post("/api/run")
+def api_run():
+    if S.running:
+        return jsonify(error="Уже идёт работа"), 409
+    data = request.get_json(force=True)
+    items = data.get("deals", [])
+    if not items:
+        return jsonify(error="Не выбрано ни одной сделки"), 400
+    pipeline = (data.get("pipeline") or "").strip()
+    if not pipeline:
+        return jsonify(error="Выберите воронку"), 400
+    for it in items:
+        S.set_row(it["id"], status="queued", error=None)
+    S.running = True
+    S.stop_flag = False
+    jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline}))
+    return jsonify(ok=True)
+
+
+@app.post("/api/continue")
+def api_continue():
+    S.continue_evt.set()
+    return jsonify(ok=True)
+
+
+@app.post("/api/stop")
+def api_stop():
+    S.stop_flag = True
+    S.continue_evt.set()
+    S.add_log("Запрошена остановка — закончу текущий шаг.")
+    return jsonify(ok=True)
+
+
+@app.post("/api/forget")
+def api_forget():
+    name = request.get_json(force=True).get("name", "")
+    p = load_progress()
+    if p.pop(name, None) is not None:
+        save_progress(p)
+    return jsonify(ok=True)
+
+
+@app.get("/api/status")
+def api_status():
+    global _last_seen
+    _last_seen = time.time()
+    with S.lock:
+        return jsonify(log=S.log[-200:], rows=S.rows, running=S.running, waiting=S.waiting,
+                       loggedIn=S.logged_in, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
+                       pipelines=S.pipelines, total=S.total, doneN=S.done_n, failedN=S.failed_n)
+
+
+def open_ui(url: str):
+    """Открывает интерфейс отдельным окном без адресной строки (как приложение).
+    Если Edge/Chrome не найдены — обычной вкладкой браузера."""
+    import subprocess
+    candidates = [
+        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ]
+    for exe in candidates:
+        if os.path.exists(exe):
+            try:
+                subprocess.Popen([exe, f"--app={url}", "--window-size=1400,900"])
+                return
+            except OSError:
+                continue
+    webbrowser.open(url)
+
+
+def port_busy(port: int) -> bool:
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def main():
+    port = int(CONFIG.get("port", 8765))
+    url = f"http://127.0.0.1:{port}"
+    if port_busy(port):
+        # приложение уже запущено — просто показываем его окно
+        print("Приложение уже запущено, открываю окно.")
+        if "--no-open" not in sys.argv:
+            open_ui(url)
+        return
+    threading.Thread(target=worker, daemon=True).start()
+    if paths.FROZEN:
+        threading.Thread(target=idle_watchdog, daemon=True).start()
+        first_run_shortcut()
+    print(f"Приложение работает: {url}")
+    if "--no-open" not in sys.argv:
+        threading.Timer(1.0, lambda: open_ui(url)).start()
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+
+
+def idle_watchdog():
+    """У exe нет консоли, которую можно закрыть. Поэтому программа завершается сама,
+    когда окно приложения закрыто (страница перестала опрашивать сервер) и бот не работает."""
+    while True:
+        time.sleep(15)
+        if not S.running and time.time() - _last_seen > IDLE_EXIT_SEC:
+            os._exit(0)  # фоновый браузер amoCRM закроется вместе с процессом
+
+
+def first_run_shortcut():
+    """При первом запуске exe кладёт ярлык «Сделки amoCRM» на рабочий стол."""
+    flag = paths.DATA_DIR / ".shortcut_created"
+    if flag.exists():
+        return
+    try:
+        import make_shortcut
+        if make_shortcut.create(Path(sys.executable)):
+            flag.write_text("1", encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def message_box(text: str):
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text, "Сделки amoCRM", 0x10)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        message_box(f"Не удалось запустить программу:\n{e}\n\nПодробности: {paths.LOG_DIR / 'console.log'}")
+        raise
