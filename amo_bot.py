@@ -71,7 +71,8 @@ class AmoBot:
         # AMO_HEADLESS=1 — без окна браузера, только для автоматических проверок
         kwargs = dict(headless=os.environ.get("AMO_HEADLESS") == "1", slow_mo=self.slow_mo,
                       no_viewport=True,  # страница подстраивается под реальный размер окна
-                      args=["--start-maximized"])
+                      # после «Стоп» браузер закрывается принудительно — без предложения «восстановить вкладки»
+                      args=["--start-maximized", "--hide-crash-restore-bubble"])
         # Edge есть на любом Windows 10/11 — тогда ничего не нужно скачивать.
         # Затем Chrome, затем Chromium от Playwright (если установлен).
         # У каждого браузера свой профиль: профили разных браузеров несовместимы.

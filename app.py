@@ -159,7 +159,8 @@ def worker():
                 run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""))
         except Exception as e:  # noqa: BLE001
             if is_closed_error(e) or (bot is not None and bot.closed):
-                S.add_log("Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
+                S.add_log("Окно amoCRM закрыто — при следующем запуске оно откроется снова." if S.stop_flag
+                          else "Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
                 close_bot()
             elif S.relogin:
                 S.add_log(str(e).splitlines()[0])
@@ -208,12 +209,13 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
         if state["url"]:
             S.add_log(f"   Сделка уже есть ({state['contacts_done']} контакт.), дозаполняю")
         last_err = None
+        created = False
         for attempt in (1, 2):
             if S.stop_flag:
                 break
             try:
                 create_or_resume(bot, name, contacts, pipeline, state)
-                last_err = None
+                last_err, created = None, True
                 break
             except Exception as e:  # noqa: BLE001
                 last_err = e
@@ -233,7 +235,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
                     progress[name] = {"url": state["url"], "status": "partial",
                                       "contacts_done": state["contacts_done"], "at": time.strftime("%Y-%m-%d %H:%M")}
                     save_progress(progress)
-        if last_err is None and not S.stop_flag:
+        if created:  # сделка дозаполнена до конца — засчитываем, даже если в этот момент нажали «Стоп»
             progress[name] = {"url": state["url"], "status": "ok", "at": time.strftime("%Y-%m-%d %H:%M")}
             save_progress(progress)
             S.set_row(rid, status="ok", url=state["url"])
@@ -249,7 +251,9 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
         with S.lock:
             S.failed_n += 1
         if isinstance(last_err, BrowserClosed):
-            S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
+            S.logged_in = False
+            S.add_log("   Остановлено, окно amoCRM закрыто — при следующем запуске оно откроется снова."
+                      if S.stop_flag else "❌ Окно amoCRM закрыто — останавливаюсь.")
             break
         errors_in_row += 1
         if errors_in_row >= MAX_ERRORS_IN_ROW:
@@ -368,9 +372,16 @@ def api_continue():
 
 @app.post("/api/stop")
 def api_stop():
+    """Останавливает сразу. На паузе «Проверьте форму» хватает флага (бот ничего не делает).
+    Иначе бот может быть посреди действия — закрываем браузер amoCRM, чтобы его оборвать;
+    при следующем запуске браузер откроется снова (вход сохраняется в профиле)."""
     S.stop_flag = True
     S.continue_evt.set()
-    S.add_log("Запрошена остановка — закончу текущий шаг.")
+    if S.waiting:
+        S.add_log("Остановлено.")
+    else:
+        S.add_log("Остановлено — прерываю текущее действие и закрываю окно amoCRM.")
+        threading.Thread(target=kill_amo_browser, daemon=True).start()
     return jsonify(ok=True)
 
 
@@ -419,10 +430,10 @@ def open_ui(url: str) -> bool:
     return False
 
 
-def find_window_process() -> int | None:
-    """PID главного процесса браузера с окном программы (ищется по профилю окна)."""
+def find_browser_pids(profile) -> list[int]:
+    """PID главных процессов Edge/Chrome, запущенных с профилем profile (без дочерних --type=...)."""
     import subprocess
-    prof = str(WINDOW_PROFILE).lower()
+    prof = str(profile).lower()
     ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | "
           "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
     try:
@@ -430,13 +441,29 @@ def find_window_process() -> int | None:
                              text=True, encoding="utf-8", errors="replace", timeout=20,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
     except Exception:  # noqa: BLE001
-        return None
+        return []
+    pids = []
     for line in out.splitlines():
         pid, _, cmd = line.partition("\t")
         cmd = cmd.lower()
         if prof in cmd and "--type=" not in cmd and pid.strip().isdigit():
-            return int(pid)
-    return None
+            pids.append(int(pid))
+    return pids
+
+
+def find_window_process() -> int | None:
+    """PID главного процесса браузера с окном программы (ищется по профилю окна)."""
+    pids = find_browser_pids(WINDOW_PROFILE)
+    return pids[0] if pids else None
+
+
+def kill_amo_browser():
+    """Закрывает браузер amoCRM принудительно. Playwright нельзя прервать из другого потока,
+    а так текущее действие бота обрывается сразу (ошибка «окно закрыто» → остановка)."""
+    import subprocess
+    for pid in find_browser_pids(paths.PROFILE_DIR):
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def close_with_window():
