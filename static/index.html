@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Сделки в amoCRM</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%231d5fa8'/%3E%3Cpath d='M8 9h16M8 16h16M8 23h10' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
+<script>try{const t=localStorage.getItem("theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;}catch(e){}</script>
 <style>
 /* Рабочий инструмент: плотно, спокойно, как офисная программа.
    Плоские панели, минимальные скругления, таблица как лист Excel. */
@@ -19,7 +20,7 @@
   color-scheme:light;
 }
 @media (prefers-color-scheme: dark){
-  :root{
+  :root:not([data-theme=light]){
     --bg:#18191b; --surface:#212225; --head:#26272b; --hover:#2a2d33;
     --text:#e6e6e3; --muted:#a2a29e; --faint:#7a7a76;
     --line:#323338; --line-2:#45464c;
@@ -30,6 +31,16 @@
     color-scheme:dark;
   }
 }
+:root[data-theme=dark]{
+    --bg:#18191b; --surface:#212225; --head:#26272b; --hover:#2a2d33;
+    --text:#e6e6e3; --muted:#a2a29e; --faint:#7a7a76;
+    --line:#323338; --line-2:#45464c;
+    --accent:#4f8fd6; --accent-hover:#6aa2e0; --accent-weak:#1f2f44;
+    --ok:#5cb87a; --err:#ef7b72; --err-weak:#3a2220;
+    --warn:#e0b44d; --warn-weak:#352c17; --warn-line:#6e5a26;
+    --input:#1b1c1f;
+    color-scheme:dark;
+  }
 *{box-sizing:border-box}
 html{-webkit-font-smoothing:antialiased}
 body{margin:0;background:var(--bg);color:var(--text);
@@ -42,6 +53,9 @@ header{display:flex;align-items:center;gap:16px;height:44px;padding:0 20px;backg
 header h1{font-size:14px;margin:0;font-weight:600;letter-spacing:.1px}
 .spacer{flex:1}
 #ver{color:var(--faint);font-size:12px}
+#theme{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;font-size:12px;color:var(--muted)}
+#theme svg{width:14px;height:14px}
+#theme:hover:not(:disabled){color:var(--text)}
 .status-conn{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 10px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--muted);font:inherit;font-size:12px;cursor:pointer;transition:border-color .15s,color .15s}
 .status-conn::before{content:"";width:7px;height:7px;border-radius:1px;background:var(--faint)}
 .status-conn:hover{border-color:var(--accent);color:var(--text)}
@@ -154,6 +168,7 @@ details summary:hover{color:var(--text)}
   <h1>Сделки в amoCRM</h1>
   <button id="conn" class="status-conn" title="Открыть окно amoCRM и войти">amoCRM: войти</button>
   <div class="spacer"></div>
+  <button id="theme" title="Сменить тему оформления"></button>
   <span id="ver"></span>
 </header>
 
@@ -231,6 +246,22 @@ async function post(url, body){
   if(!r.ok) alert(j.error || "Ошибка");
   return r.ok;
 }
+
+// ---------- тема ----------
+const THEMES = {
+  auto:  {next:"light", label:"Тема: как в системе", icon:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2.5" width="13" height="9" rx="1"/><path d="M5.5 14h5M8 11.5V14"/></svg>'},
+  light: {next:"dark",  label:"Тема: светлая", icon:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="3"/><path d="M8 1v1.8M8 13.2V15M1 8h1.8M13.2 8H15M3 3l1.3 1.3M11.7 11.7L13 13M3 13l1.3-1.3M11.7 4.3L13 3"/></svg>'},
+  dark:  {next:"auto",  label:"Тема: тёмная", icon:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.5 10A6 6 0 0 1 6 2.5a6 6 0 1 0 7.5 7.5z"/></svg>'},
+};
+function applyTheme(t){
+  if(!THEMES[t]) t = "auto";
+  if(t === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = t;
+  $("#theme").innerHTML = THEMES[t].icon + `<span>${THEMES[t].label}</span>`;
+  $("#theme").dataset.t = t;
+}
+$("#theme").onclick = () => { const t = THEMES[$("#theme").dataset.t].next; store.set("theme", t); applyTheme(t); };
+applyTheme(store.get("theme", "auto"));
 
 // ---------- проверка данных ----------
 const PHONE_RE = /^\+7\d{10}(\s*\(.+\))?$/;
