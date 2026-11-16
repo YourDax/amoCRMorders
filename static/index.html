@@ -81,6 +81,8 @@ tr.off td:not(:first-child):not(.status):not(:last-child){opacity:.5}
 .b-ok{background:var(--ok-bg);color:var(--ok)} .b-err{background:var(--err-bg);color:var(--err)}
 .b-work{background:var(--accent-2);color:var(--accent)} .b-q{background:var(--line);color:var(--muted)}
 .b-part,.b-ref{background:var(--warn-bg);color:var(--warn)}
+.b-red{background:var(--err-bg);color:var(--err)}
+tr.red td.name input{color:var(--err)}
 td.status{min-width:120px}
 td.status a{color:var(--accent);font-size:12px;margin-left:4px}
 td.status .err{display:block;color:var(--err);font-size:12px;max-width:240px}
@@ -210,16 +212,17 @@ async function upload(f){
   const j = await r.json();
   fileInp.value = "";
   if(!r.ok){ alert(j.error); return; }
-  j.deals.forEach(d => d.sel = !isDone(d) && !d.refused);
+  j.deals.forEach(d => d.sel = !isDone(d) && !d.refused && !d.red);
   original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
   document.body.classList.add("loaded");
   $("#drop").innerHTML = '<span class="big-t">Другой файл</span> — перетащите или нажмите';
-  const refused = deals.filter(d => d.refused).length, done = deals.filter(isDone).length;
+  const refused = deals.filter(d => d.refused && !d.red).length, red = deals.filter(d => d.red).length, done = deals.filter(isDone).length;
   $("#meta").classList.remove("hidden");
   $("#meta").innerHTML = `<span>📄 <b>${esc(j.file)}</b></span>
     <label>Школа <input id="school" value="${esc(school)}" title="Поменяет школу во всех названиях"></label>
     <span>Классов: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
+    ${red ? `<span>Красные в файле: <b>${red}</b> (не отмечены)</span>` : ""}
     ${refused ? `<span>Похоже на отказ: <b>${refused}</b> (не отмечены)</span>` : ""}`;
   $("#school").onchange = e => renameSchool(e.target.value.trim());
   $("#warnings").innerHTML = j.warnings.length ? `<div class="warn">${j.warnings.map(esc).join("<br>")}</div>` : "";
@@ -242,14 +245,14 @@ function renderRows(){
   }
   $("#rows").innerHTML = deals.map(d => {
     const inp = (f, v) => `<input type="text" data-f="${f}" value="${esc(v)}">`;
-    return `<tr data-id="${d.id}">
+    return `<tr data-id="${d.id}" class="${d.red ? 'red' : ''}">
       <td><input type="checkbox" class="sel" ${d.sel?'checked':''}></td>
       <td class="name" title="${esc(d.sheet)}, строка ${d.row}">${inp("name", d.name)}</td>
       <td>${inp("kr.name", d.kr.name)}</td>
       <td><div class="cell">${inp("kr.phone", d.kr.phone)}<button class="x" data-clear="kr" title="Убрать КР из этой сделки">×</button></div></td>
       <td>${inp("rk.name", d.rk.name)}</td>
       <td><div class="cell">${inp("rk.phone", d.rk.phone)}<button class="x" data-clear="rk" title="Убрать РК из этой сделки">×</button></div></td>
-      <td class="info" title="${esc(d.info)}">${d.refused ? '<span class="badge b-ref">отказ?</span> ' : ''}<div>${esc(d.info)}</div></td>
+      <td class="info" title="${esc(d.red ? 'Строка помечена в файле красным — по умолчанию не создаётся. ' : '')}${esc(d.info)}">${d.red ? '<span class="badge b-red">красная в файле</span> ' : ''}${d.refused ? '<span class="badge b-ref">отказ?</span> ' : ''}<div>${esc(d.info)}</div></td>
       <td class="status"></td>
       <td><button class="x" data-del title="Убрать строку из списка">🗑</button></td>
     </tr>`;

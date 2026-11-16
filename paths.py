@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "amoCRMorders"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 FROZEN = bool(getattr(sys, "frozen", False))
 RES_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))

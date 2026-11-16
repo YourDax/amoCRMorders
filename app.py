@@ -283,7 +283,7 @@ def api_parse():
             "id": f"r{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass,
             "kr": {"name": kr.name if kr else "", "phone": kr.phone_field if kr else ""},
             "rk": {"name": rk.name if rk else "", "phone": rk.phone_field if rk else ""},
-            "info": d.info, "refused": d.refused,
+            "info": d.info, "refused": d.refused, "red": d.red,
             "done": done.get("url") if done else None,
             "doneStatus": done.get("status") if done else None,
         })
@@ -386,6 +386,8 @@ def port_busy(port: int) -> bool:
 
 def main():
     port = int(CONFIG.get("port", 8765))
+    if "--port" in sys.argv:  # для проверок рядом с уже запущенной программой
+        port = int(sys.argv[sys.argv.index("--port") + 1])
     url = f"http://127.0.0.1:{port}"
     if port_busy(port):
         # приложение уже запущено — просто показываем его окно

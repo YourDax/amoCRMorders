@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import openpyxl
 
+from excel_colors import cell_is_red, theme_palette
+
 HEADER_ALIASES = {
     "class": ["класс"],
     "kr_name": ["фио кр"],
@@ -51,6 +53,7 @@ class Deal:
     klass: str
     contacts: list[Contact] = field(default_factory=list)
     info: str = ""      # «Доп.Информация / Причина отказа» из отчёта
+    red: bool = False   # строка помечена в файле красным — по умолчанию не создаём
 
     @property
     def refused(self) -> bool:
@@ -161,6 +164,7 @@ def _find_header(ws) -> tuple[int, dict[str, int]] | None:
 def read_deals(path: str, sheets: list[str] | None = None, school_override: str = "") -> tuple[list[Deal], list[str]]:
     """Читает книгу. Возвращает (сделки, предупреждения)."""
     wb = openpyxl.load_workbook(path, data_only=True)
+    palette = theme_palette(wb)
     deals: list[Deal] = []
     warnings: list[str] = []
 
@@ -185,7 +189,9 @@ def read_deals(path: str, sheets: list[str] | None = None, school_override: str 
             if not school:
                 warnings.append(f"Лист «{ws.title}»: не заполнена школа (ячейка «Школа: ...»), строки пропущены")
                 break
-            deal = Deal(sheet=ws.title, row=r, school=school, klass=klass, info=_cell_text(get(r, "info")))
+            red = any(cell_is_red(ws.cell(row=r, column=col), palette) for col in cols.values())
+            deal = Deal(sheet=ws.title, row=r, school=school, klass=klass,
+                        info=_cell_text(get(r, "info")), red=red)
             kr = _make_contact("КР", get(r, "kr_name"), get(r, "kr_phone"))
             rk = _make_contact("РК", get(r, "rk_name"), get(r, "rk_phone"))
             if kr:
