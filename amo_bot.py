@@ -51,6 +51,9 @@ def is_closed_error(e: BaseException) -> bool:
     return any(s in m for s in ("has been closed", "Target closed", "Browser closed", "Connection closed"))
 
 
+STOPPED_MSG = "Остановлено пользователем"
+
+
 class AmoBot:
     def __init__(self, base_url: str, step: bool = False, slow_mo: int = 150, timeout: int = 15000):
         self.base_url = base_url.rstrip("/")
@@ -64,6 +67,7 @@ class AmoBot:
         self.ctx: BrowserContext | None = None
         self.page: Page | None = None
         self._ctx_closed = False
+        self.should_stop = lambda: False  # функция() -> True, если нажали «Стоп»
 
     # ---------- запуск / вход ----------
     def start(self):
@@ -71,7 +75,7 @@ class AmoBot:
         # AMO_HEADLESS=1 — без окна браузера, только для автоматических проверок
         kwargs = dict(headless=os.environ.get("AMO_HEADLESS") == "1", slow_mo=self.slow_mo,
                       no_viewport=True,  # страница подстраивается под реальный размер окна
-                      # после «Стоп» браузер закрывается принудительно — без предложения «восстановить вкладки»
+                      # если браузер закрылся аварийно — не предлагать «восстановить вкладки»
                       args=["--start-maximized", "--hide-crash-restore-bubble"])
         # Edge есть на любом Windows 10/11 — тогда ничего не нужно скачивать.
         # Затем Chrome, затем Chromium от Playwright (если установлен).
@@ -114,6 +118,33 @@ class AmoBot:
                 raise BrowserClosed() from None
             raise
 
+    def check_stop(self):
+        """Нажали «Стоп» — прерываемся здесь же (браузер не закрываем)."""
+        if self.should_stop():
+            raise RuntimeError(STOPPED_MSG)
+
+    def _sleep(self, ms: int):
+        """Пауза кусочками, чтобы «Стоп» срабатывал сразу."""
+        end = time.time() + ms / 1000
+        while True:
+            self.check_stop()
+            left = end - time.time()
+            if left <= 0:
+                return
+            self.wait(int(min(left, 0.2) * 1000))
+
+    def _wait_until(self, fn, timeout_ms: int, step_ms: int = 300) -> bool:
+        """Ждёт, пока fn() не станет True (fn сама ждёт не дольше step_ms), проверяя «Стоп»."""
+        end = time.time() + timeout_ms / 1000
+        while time.time() < end:
+            self.check_stop()
+            try:
+                if fn():
+                    return True
+            except PWTimeout:
+                pass
+        return False
+
     def ensure_logged_in(self, wait_minutes: int = 5, cancelled=lambda: False):
         p = self.page
         try:
@@ -125,6 +156,7 @@ class AmoBot:
             while time.time() < deadline:
                 if cancelled():
                     raise RuntimeError("Вход отменён — открываю окно amoCRM заново")
+                self.check_stop()
                 if self._nav_deals_visible(1000):
                     self.log_cb("Вход выполнен.")
                     return
@@ -178,6 +210,7 @@ class AmoBot:
         btn.click()
 
     def _pause(self, msg: str):
+        self.check_stop()
         if self.pause_cb:
             self.pause_cb(msg)
         elif self.step:
@@ -194,52 +227,99 @@ class AmoBot:
         return path
 
     # ---------- сценарий ----------
-    def _pipeline_href(self, pipeline: str) -> str:
-        """Ссылка на воронку из меню «Сделки» (ищем и среди скрытых пунктов)."""
-        return self.page.evaluate("""name => {
-            const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-            const a = [...document.querySelectorAll('a[href*="/leads/pipeline/"]')]
-                .find(a => norm(a.textContent) === norm(name));
-            return a ? a.href : '';
-        }""", pipeline)
+    @staticmethod
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", s or "").strip().lower()
+
+    def _pipelines_from_api(self) -> dict[str, str]:
+        """Воронки через API amoCRM из уже открытой (залогиненной) страницы — без меню.
+        {название: ссылка}; пусто, если API не ответил."""
+        try:
+            data = self.page.evaluate("""async () => {
+                const r = await fetch('/api/v4/leads/pipelines', {credentials: 'include',
+                    headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'}});
+                if (!r.ok) return [];
+                const j = await r.json();
+                return ((j._embedded || {}).pipelines || []).map(p => [p.name, p.id]);
+            }""")
+        except Exception as e:  # noqa: BLE001
+            if is_closed_error(e):
+                raise
+            return {}
+        return {name: f"{self.base_url}/leads/pipeline/{pid}/" for name, pid in data if name and pid}
+
+    def _pipelines_from_menu(self) -> dict[str, str]:
+        """Пункты воронок, которые сейчас есть в разметке меню «Сделки» (в том числе скрытые)."""
+        pairs = self.page.evaluate("""() => [...document.querySelectorAll('a[href*="/leads/pipeline/"]')]
+            .map(a => [(a.textContent || '').replace(/\\s+/g, ' ').trim(), a.href])
+            .filter(([t]) => t && t.length < 80)""")
+        return {name: href for name, href in pairs}
+
+    def _match(self, found: dict[str, str], pipeline: str) -> str:
+        """Ссылка на воронку: сначала точное совпадение названия, потом «начинается с»
+        (в меню к названию может добавляться число сделок)."""
+        want = self._norm(pipeline)
+        for name, href in found.items():
+            if self._norm(name) == want:
+                return href
+        for name, href in found.items():
+            if self._norm(name).startswith(want):
+                return href
+        return ""
+
+    def _pipeline_via_hover(self, pipeline: str) -> str:
+        """Запасной путь: навести на «Сделки», увести курсор в столбец воронок и держать его там,
+        пока не появится нужная воронка (раньше курсор уводился в сторону и меню сворачивалось)."""
+        p = self.page
+        for _ in range(3):
+            self.check_stop()
+            nav = self._nav_deals()
+            nav.hover()
+            box = nav.bounding_box()
+            if box:  # вправо от иконки «Сделки» — туда, где выезжает столбец воронок
+                p.mouse.move(box["x"] + box["width"] + 40, box["y"] + box["height"] / 2, steps=8)
+            href = ""
+
+            def found():
+                nonlocal href
+                href = self._match(self._pipelines_from_menu(), pipeline)
+                if not href:
+                    self.wait(250)
+                return bool(href)
+
+            if self._wait_until(found, 5000):
+                return href
+        return ""
 
     def open_pipeline(self, pipeline: str):
-        """Открывает воронку по её ссылке из меню «Сделки».
-
-        Раньше бот наводил курсор и кликал в подменю, но amoCRM после этого оставлял
-        затемнение страницы. Теперь ссылка берётся из меню один раз и открывается напрямую —
-        страница загружается заново, без затемнения.
-        """
+        """Открывает воронку по прямой ссылке (страница загружается заново, без затемнения).
+        Ссылка: из запомненных → из API amoCRM → из разметки меню → наведением на «Сделки»."""
         p = self.page
-        href = self._pipeline_urls.get(pipeline) or self._pipeline_href(pipeline)
+        href = self._pipeline_urls.get(pipeline)
         if not href:
-            # пункты меню ещё не отрисованы — наводим на «Сделки», чтобы меню появилось
-            for _ in range(3):
-                self._nav_deals().hover()
-                p.wait_for_timeout(1200)
-                href = self._pipeline_href(pipeline)
+            for source in (self._pipelines_from_api, self._pipelines_from_menu):
+                found = source()
+                self._pipeline_urls.update({k: v for k, v in found.items() if k not in self._pipeline_urls})
+                href = self._match(found, pipeline)
                 if href:
                     break
-                self._mouse_away()
+        if not href:
+            href = self._pipeline_via_hover(pipeline)
             self._mouse_away()
             p.keyboard.press("Escape")
         if not href:
             raise RuntimeError(f"Не нашёл воронку «{pipeline}» в меню «Сделки»")
         self._pipeline_urls[pipeline] = href
+        self.check_stop()
         p.goto(href, wait_until="domcontentloaded")
         self._mouse_away()
 
     def list_pipelines(self) -> list[str]:
-        """Названия воронок из меню «Сделки» (без наведения — пункты есть в разметке)."""
-        names = self.page.evaluate("""() => [...document.querySelectorAll('a[href*="/leads/pipeline/"]')]
-            .map(a => [(a.textContent || '').replace(/\\s+/g, ' ').trim(), a.href])
-            .filter(([t]) => t && t.length < 60)""")
-        out = []
-        for name, href in names:
-            if name not in out:
-                out.append(name)
-                self._pipeline_urls.setdefault(name, href)
-        return out
+        """Названия воронок: через API amoCRM, если не вышло — из разметки меню «Сделки»."""
+        found = self._pipelines_from_api() or self._pipelines_from_menu()
+        for name, href in found.items():
+            self._pipeline_urls.setdefault(name, href)
+        return list(found)
 
     def open_deal(self, url: str):
         """Открывает уже созданную сделку (для дозаполнения контактов)."""
@@ -256,7 +336,7 @@ class AmoBot:
         p = self.page
         w, h = p.evaluate("[window.innerWidth, window.innerHeight]")
         p.mouse.move(w * 0.75, h * 0.6, steps=5)
-        p.wait_for_timeout(600)
+        self._sleep(600)
 
     def _is_clickable(self, loc: Locator) -> bool:
         """Не перекрыт ли элемент затемнением/всплывашкой: что лежит сверху в его центре."""
@@ -271,9 +351,11 @@ class AmoBot:
     def _click_when_free(self, loc: Locator, what: str, timeout_s: float = 15):
         """Кликает, когда элемент не перекрыт. Если перекрыт — уводит курсор и жмёт Escape."""
         p = self.page
-        loc.wait_for(state="visible", timeout=int(timeout_s * 1000))
+        if not self._wait_until(lambda: loc.wait_for(state="visible", timeout=300) or True, int(timeout_s * 1000)):
+            raise PWTimeout(f"Не дождался кнопки «{what}»")
         deadline = time.time() + timeout_s
         while time.time() < deadline:
+            self.check_stop()
             try:  # кнопка может быть за краем маленького окна
                 loc.scroll_into_view_if_needed(timeout=2000)
             except PWTimeout:
@@ -284,7 +366,7 @@ class AmoBot:
             self._mouse_away()
             if not self._is_clickable(loc):
                 p.keyboard.press("Escape")
-                p.wait_for_timeout(500)
+                self._sleep(500)
         raise RuntimeError(f"Кнопка «{what}» перекрыта (страница затемнена) и не нажимается")
 
     def open_new_deal(self, pipeline: str = ""):
@@ -304,9 +386,12 @@ class AmoBot:
                 raise RuntimeError("Не нашёл кнопку «Новая сделка» на странице воронки")
             # запасной путь — прямая ссылка на форму новой сделки
             p.goto(self.base_url + "/leads/add/", wait_until="domcontentloaded")
-        self._deal_name_input().wait_for(state="visible")
+        if not self._wait_until(lambda: self._deal_name_input().wait_for(state="visible", timeout=300) or True,
+                                self.timeout):
+            raise RuntimeError("Не открылась форма новой сделки")
 
     def fill_deal_name(self, name: str):
+        self.check_stop()
         inp = self._deal_name_input()
         inp.click()
         inp.fill(name)
@@ -325,29 +410,34 @@ class AmoBot:
     def fill_contact(self, c: Contact, company: str = ""):
         """Заполняет форму контакта. company — в поле «Название компании» (класс + школа)."""
         p = self.page
+        self.check_stop()
         name_inp = self._find_empty_contact_input()
         if name_inp is None:
             # пустой формы контакта нет — нажимаем «+ Добавить контакт»
             p.get_by_text(SEL["add_contact_text"], exact=True).last.click()
-            p.wait_for_timeout(700)
+            self._sleep(700)
             name_inp = self._find_empty_contact_input()
         if name_inp is None:
             raise RuntimeError("Не нашёл пустое поле «Добавить контакт»")
         form = self._contact_form(name_inp)
 
+        self.check_stop()
         name_inp.click()
         name_inp.fill(c.name)
         # amoCRM показывает подсказки существующих контактов — не выбираем их,
         # просто уходим в следующее поле, чтобы создался новый контакт.
+        self.check_stop()
         phone_inp = self._field_by_label(form, SEL["label_phone"])
         phone_inp.click()
         phone_inp.fill(c.phone_field)
 
+        self.check_stop()
         pos_inp = self._field_by_label(form, SEL["label_position"])
         pos_inp.click()
         pos_inp.fill(c.role)
 
         if company:
+            self.check_stop()
             # заполняем последним: подсказки существующих компаний не перекроют другие поля
             comp_inp = form.get_by_placeholder(SEL["company_placeholder"]).first
             if comp_inp.count() == 0 or not comp_inp.is_visible():
@@ -357,7 +447,10 @@ class AmoBot:
             self._mouse_away()
 
     def save(self):
+        """После нажатия «Сохранить» «Стоп» уже не прерывает: иначе сделка может сохраниться,
+        а программа об этом не узнает и при повторе создаст дубль. Ожидание — несколько секунд."""
         p = self.page
+        self.check_stop()
         new_deal = "/leads/add" in p.url
         self._click_save()
         # Не ждём «networkidle»: amoCRM постоянно держит соединения, и такое ожидание

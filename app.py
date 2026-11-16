@@ -132,6 +132,7 @@ def worker():
         bot = AmoBot(CONFIG["amo_url"], slow_mo=CONFIG.get("slow_mo_ms", 150))
         bot.log_cb = S.add_log
         bot.ui_pause = pause
+        bot.should_stop = lambda: S.stop_flag
         bot.start()
         S.browser_open = True
         bot.ensure_logged_in(wait_minutes=10, cancelled=lambda: S.relogin)
@@ -159,8 +160,7 @@ def worker():
                 run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""))
         except Exception as e:  # noqa: BLE001
             if is_closed_error(e) or (bot is not None and bot.closed):
-                S.add_log("Окно amoCRM закрыто — при следующем запуске оно откроется снова." if S.stop_flag
-                          else "Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
+                S.add_log("Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
                 close_bot()
             elif S.relogin:
                 S.add_log(str(e).splitlines()[0])
@@ -220,6 +220,10 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 if "Остановлено пользователем" in str(e):
+                    if state["url"]:  # сделка уже сохранена частично — запомнить для дозаполнения
+                        progress[name] = {"url": state["url"], "status": "partial",
+                                          "contacts_done": state["contacts_done"], "at": time.strftime("%Y-%m-%d %H:%M")}
+                        save_progress(progress)
                     break
                 if is_closed_error(e) or bot.closed:  # окно amoCRM закрыли — повторять бессмысленно
                     last_err = BrowserClosed()
@@ -252,8 +256,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
             S.failed_n += 1
         if isinstance(last_err, BrowserClosed):
             S.logged_in = False
-            S.add_log("   Остановлено, окно amoCRM закрыто — при следующем запуске оно откроется снова."
-                      if S.stop_flag else "❌ Окно amoCRM закрыто — останавливаюсь.")
+            S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
             break
         errors_in_row += 1
         if errors_in_row >= MAX_ERRORS_IN_ROW:
@@ -341,6 +344,7 @@ def api_login():
         return jsonify(error="Идёт создание сделок — дождитесь окончания или нажмите «Стоп»"), 409
     if S.phase == "login":
         S.relogin = True  # прервать текущее ожидание входа
+    S.stop_flag = False  # прежний «Стоп» не должен прервать новый вход
     S.running = True
     jobs.put(("login", {}))
     return jsonify(ok=True)
@@ -373,16 +377,12 @@ def api_continue():
 
 @app.post("/api/stop")
 def api_stop():
-    """Останавливает сразу. На паузе «Проверьте форму» хватает флага (бот ничего не делает).
-    Иначе бот может быть посреди действия — закрываем браузер amoCRM, чтобы его оборвать;
-    при следующем запуске браузер откроется снова (вход сохраняется в профиле)."""
+    """Останавливает работу бота, браузер amoCRM остаётся открытым. Бот проверяет «Стоп»
+    между всеми действиями и в ожиданиях (AmoBot.check_stop) — прерывается сразу; только уже
+    нажатое «Сохранить» доводит до конца (несколько секунд), чтобы не потерять созданную сделку."""
     S.stop_flag = True
     S.continue_evt.set()
-    if S.waiting:
-        S.add_log("Остановлено.")
-    else:
-        S.add_log("Остановлено — прерываю текущее действие и закрываю окно amoCRM.")
-        threading.Thread(target=kill_amo_browser, daemon=True).start()
+    S.add_log("Остановлено." if S.waiting else "Остановка — прерываю текущее действие.")
     return jsonify(ok=True)
 
 
@@ -458,13 +458,6 @@ def find_window_process() -> int | None:
     return pids[0] if pids else None
 
 
-def kill_amo_browser():
-    """Закрывает браузер amoCRM принудительно. Playwright нельзя прервать из другого потока,
-    а так текущее действие бота обрывается сразу (ошибка «окно закрыто» → остановка)."""
-    import subprocess
-    for pid in find_browser_pids(paths.PROFILE_DIR):
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def close_with_window():
