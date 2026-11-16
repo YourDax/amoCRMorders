@@ -28,7 +28,7 @@ if sys.stdout is None or sys.stderr is None:
 
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
-from excel_reader import Contact, Deal, read_deals  # noqa: E402
+from excel_reader import Contact, Deal, fix_name_case, read_deals  # noqa: E402
 
 CONFIG = paths.load_config()
 if os.environ.get("AMO_URL"):  # для проверок на макете amoCRM
@@ -189,7 +189,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
             break
         rid = it["id"]
         name = it["name"].strip()
-        contacts = [Contact(role=c["role"], name=c["name"].strip(), phone=c["phone"].strip())
+        contacts = [Contact(role=c["role"], name=fix_name_case(c["name"].strip()), phone=c["phone"].strip())
                     for c in it["contacts"] if c["name"].strip() or c["phone"].strip()]
         prev = progress.get(name, {})
         if prev.get("status") == "ok":
@@ -307,6 +307,7 @@ def api_parse():
     f.save(tmp)
     try:
         deals, warnings = read_deals(str(tmp), None, request.form.get("school", ""))
+        kind = deals[0].kind if deals else None
     except Exception as e:  # noqa: BLE001
         return jsonify(error=f"Не удалось прочитать файл: {e}"), 400
     finally:
@@ -314,7 +315,7 @@ def api_parse():
     progress = load_progress()
     out = []
     for i, d in enumerate(deals):
-        kr = next((c for c in d.contacts if c.role == "КР"), None)
+        kr = next((c for c in d.contacts if c.role in ("КР", "ВС")), None)
         rk = next((c for c in d.contacts if c.role == "РК"), None)
         done = progress.get(d.name)
         out.append({
@@ -330,7 +331,7 @@ def api_parse():
         if not S.running:
             S.total = S.done_n = S.failed_n = 0
     school = deals[0].school if deals else ""
-    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename)
+    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename, kind=kind or "school")
 
 
 @app.post("/api/login")

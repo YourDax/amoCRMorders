@@ -1,9 +1,13 @@
 """Чтение отчёта по мероприятию (xlsx) и превращение строк в сделки.
 
 Ожидаемый формат листа (как в «Отчет по мероприятию»):
-  * в первых строках есть ячейка «Школа: <название>»;
-  * строка заголовков с колонками «Класс», «ФИО КР», «Телефон КР», «ФИО РК», «Телефон РК»;
-  * ниже — по строке на класс. Строки без класса пропускаются.
+  * в первых строках есть ячейка «Школа: <название>» (детский сад — «ДС: <название>»);
+  * строка заголовков с колонками «Класс», «ФИО КР», «Телефон КР», «ФИО РК», «Телефон РК»
+    (детский сад — «Группа», «ФИО Воспитателя», «Телефон Воспитателя», «ФИО РК», «Телефон РК»);
+  * ниже — по строке на класс/группу. Строки без класса пропускаются.
+
+Школа: сделка «1а ВХТЛ-сп4», первый контакт — КР (классный руководитель).
+Детский сад: сделка «гр.11 1368-до4», первый контакт — ВС (воспитатель).
 """
 
 from __future__ import annotations
@@ -16,12 +20,32 @@ import openpyxl
 from excel_colors import cell_is_red, theme_palette
 
 HEADER_ALIASES = {
-    "class": ["класс"],
-    "kr_name": ["фио кр"],
-    "kr_phone": ["телефон кр"],
+    "class": ["класс", "группа"],
+    "kr_name": ["фио кр", "фио воспитателя", "фио вс"],
+    "kr_phone": ["телефон кр", "телефон воспитателя", "телефон вс"],
     "rk_name": ["фио рк"],
     "rk_phone": ["телефон рк"],
 }
+SCHOOL, KINDERGARTEN = "school", "kindergarten"
+LEAD_ROLE = {SCHOOL: "КР", KINDERGARTEN: "ВС"}  # первый контакт: классный руководитель / воспитатель
+# подпись учреждения в шапке листа: «Школа: ...», «ДС: ...», «Детский сад: ...», «Д/с: ...»
+PLACE_RE = re.compile(r"^\s*(школа|дс|д/с|детский\s+сад)\s*[:№]?\s*(.*)$", re.I)
+
+
+def deal_name(klass: str, place: str, kind: str) -> str:
+    """Название сделки: «1а ВХТЛ-сп4» для школы, «гр.11 1368-до4» для детского сада."""
+    klass = klass.strip()
+    if kind == KINDERGARTEN:
+        klass = "гр." + re.sub(r"^гр(уппа)?\.?\s*", "", klass, flags=re.I)
+    return f"{klass} {place}".strip()
+
+
+def fix_name_case(name: str) -> str:
+    """ФИО с заглавных букв: «диля халимовна» → «Диля Халимовна», «ИВАНОВА» → «Иванова»,
+    двойные через дефис — «анна-мария» → «Анна-Мария». Инициалы («Е.») не трогает."""
+    def word(w: str) -> str:
+        return "-".join(p[:1].upper() + p[1:].lower() for p in w.split("-"))
+    return " ".join(word(w) for w in name.split())
 REFUSAL_RE = re.compile(r"отказ|друг\w* фотограф|не будут фот|не хотят", re.I)
 
 # колонки, которые узнаём по началу заголовка
@@ -49,8 +73,9 @@ class Contact:
 class Deal:
     sheet: str
     row: int
-    school: str
-    klass: str
+    school: str          # название учреждения (школа или детский сад)
+    klass: str           # класс или группа, как в файле
+    kind: str = SCHOOL
     contacts: list[Contact] = field(default_factory=list)
     info: str = ""      # «Доп.Информация / Причина отказа» из отчёта
     red: bool = False   # строка помечена в файле красным — по умолчанию не создаём
@@ -62,7 +87,7 @@ class Deal:
 
     @property
     def name(self) -> str:
-        return f"{self.klass} {self.school}".strip()
+        return deal_name(self.klass, self.school, self.kind)
 
     @property
     def key(self) -> str:
@@ -129,6 +154,7 @@ def split_name(raw) -> tuple[str, str]:
 
 def _make_contact(role: str, name_raw, phone_raw) -> Contact | None:
     name, name_note = split_name(name_raw)
+    name = fix_name_case(name)
     phone, phone_note = normalize_phone(phone_raw)
     if not name and not phone:
         return None
@@ -136,13 +162,23 @@ def _make_contact(role: str, name_raw, phone_raw) -> Contact | None:
     return Contact(role=role, name=name, phone=phone, note=note)
 
 
-def _find_school(ws) -> str:
+def _find_place(ws) -> tuple[str, str | None]:
+    """(название учреждения, тип по подписи: school / kindergarten / None)."""
     for row in ws.iter_rows(min_row=1, max_row=5):
         for c in row:
-            t = _cell_text(c.value)
-            if t.lower().startswith("школа"):
-                return t.split(":", 1)[1].strip() if ":" in t else ""
-    return ""
+            m = PLACE_RE.match(_cell_text(c.value))
+            if m:
+                return m.group(2).strip(), (SCHOOL if m.group(1).lower() == "школа" else KINDERGARTEN)
+    return "", None
+
+
+def _kind_by_headers(ws, header_row: int) -> str | None:
+    heads = [_norm_header(c.value) for c in ws[header_row]]
+    if any(h in ("группа", "фио воспитателя", "телефон воспитателя") for h in heads):
+        return KINDERGARTEN
+    if any(h in ("класс", "фио кр", "телефон кр") for h in heads):
+        return SCHOOL
+    return None
 
 
 def _find_header(ws) -> tuple[int, dict[str, int]] | None:
@@ -161,22 +197,53 @@ def _find_header(ws) -> tuple[int, dict[str, int]] | None:
     return None
 
 
-def read_deals(path: str, sheets: list[str] | None = None, school_override: str = "") -> tuple[list[Deal], list[str]]:
-    """Читает книгу. Возвращает (сделки, предупреждения)."""
+def detect_kind(path: str) -> str:
+    """Школа или детский сад — по подписи «Школа:/ДС:» и заголовкам («Класс»/«Группа», «Воспитатель»)."""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        votes = {SCHOOL: 0, KINDERGARTEN: 0}
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(min_row=1, max_row=15, values_only=True):
+                for v in row:
+                    t = _cell_text(v)
+                    m = PLACE_RE.match(t)
+                    if m:
+                        votes[SCHOOL if m.group(1).lower() == "школа" else KINDERGARTEN] += 2
+                    h = t.lower()
+                    if h in ("группа", "фио воспитателя", "телефон воспитателя"):
+                        votes[KINDERGARTEN] += 1
+                    elif h in ("класс", "фио кр", "телефон кр"):
+                        votes[SCHOOL] += 1
+        return KINDERGARTEN if votes[KINDERGARTEN] > votes[SCHOOL] else SCHOOL
+    finally:
+        wb.close()
+
+
+def read_deals(path: str, sheets: list[str] | None = None, school_override: str = "",
+               kind: str | None = None) -> tuple[list[Deal], list[str]]:
+    """Читает книгу. kind — school / kindergarten (None — определить по файлу).
+    Возвращает (сделки, предупреждения)."""
+    kind = kind or detect_kind(path)
+    lead = LEAD_ROLE[kind]
     wb = openpyxl.load_workbook(path, data_only=True)
     palette = theme_palette(wb)
     deals: list[Deal] = []
     warnings: list[str] = []
+    place_word = "детский сад (ячейка «ДС: ...»)" if kind == KINDERGARTEN else "школа (ячейка «Школа: ...»)"
 
+    per_sheet: list[tuple[str, list[Deal], list[str]]] = []  # (лист, сделки, предупреждения по строкам)
     for ws in wb.worksheets:
         if sheets and ws.title not in sheets:
             continue
+        sheet_deals: list[Deal] = []
+        sheet_warns: list[str] = []
+        per_sheet.append((ws.title, sheet_deals, sheet_warns))
         header = _find_header(ws)
         if not header:
             warnings.append(f"Лист «{ws.title}»: не найдена строка заголовков, пропущен")
             continue
         header_row, cols = header
-        school = school_override or _find_school(ws)
+        school = school_override or _find_place(ws)[0]
 
         def get(r, key):
             col = cols.get(key)
@@ -187,23 +254,33 @@ def read_deals(path: str, sheets: list[str] | None = None, school_override: str 
             if not klass:
                 continue
             if not school:
-                warnings.append(f"Лист «{ws.title}»: не заполнена школа (ячейка «Школа: ...»), строки пропущены")
+                warnings.append(f"Лист «{ws.title}»: не заполнен {place_word}, строки пропущены")
                 break
             red = any(cell_is_red(ws.cell(row=r, column=col), palette) for col in cols.values())
-            deal = Deal(sheet=ws.title, row=r, school=school, klass=klass,
+            deal = Deal(sheet=ws.title, row=r, school=school, klass=klass, kind=kind,
                         info=_cell_text(get(r, "info")), red=red)
-            kr = _make_contact("КР", get(r, "kr_name"), get(r, "kr_phone"))
+            kr = _make_contact(lead, get(r, "kr_name"), get(r, "kr_phone"))
             rk = _make_contact("РК", get(r, "rk_name"), get(r, "rk_phone"))
             if kr:
-                deal.contacts.append(kr)   # КР всегда первым
+                deal.contacts.append(kr)   # КР / воспитатель всегда первым
             else:
-                warnings.append(f"«{ws.title}» стр.{r} ({deal.name}): нет КР")
+                sheet_warns.append(f"«{ws.title}» стр.{r} ({deal.name}): нет {lead}")
             if rk:
                 deal.contacts.append(rk)
             for c in deal.contacts:
                 if not c.phone:
-                    warnings.append(f"«{ws.title}» стр.{r} ({deal.name}): у {c.role} нет телефона")
-            deals.append(deal)
+                    sheet_warns.append(f"«{ws.title}» стр.{r} ({deal.name}): у {c.role} нет телефона")
+            sheet_deals.append(deal)
+
+    # Лист без единого контакта (например «Досъем» — только номера групп) — это не список сделок:
+    # его строки дублировали бы сделки с основного листа. Пропускаем, если в файле есть листы с контактами.
+    with_contacts = any(d.contacts for _, sd, _ in per_sheet for d in sd)
+    for title, sheet_deals, sheet_warns in per_sheet:
+        if with_contacts and sheet_deals and not any(d.contacts for d in sheet_deals):
+            warnings.append(f"Лист «{title}»: нет ни одного контакта — пропущен")
+            continue
+        deals.extend(sheet_deals)
+        warnings.extend(sheet_warns)
 
     seen: dict[str, Deal] = {}
     for d in deals:

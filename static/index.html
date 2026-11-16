@@ -99,6 +99,12 @@ body:not(.loaded) .filebar{display:block}
 .meta .fname{color:var(--text);font-weight:600}
 .meta label{display:inline-flex;align-items:center;gap:8px}
 .meta input{width:150px;height:26px}
+.seg{display:inline-flex;border:1px solid var(--line-2);border-radius:var(--r);overflow:hidden;padding:0 !important}
+.seg button{height:26px;border:none;border-radius:0;padding:0 10px;font-size:12px;background:var(--surface);color:var(--muted)}
+.seg button+button{border-left:1px solid var(--line-2)}
+.seg button:hover:not(:disabled){color:var(--text);border-color:var(--line-2)}
+.seg button[aria-pressed=true]{background:var(--accent-weak);color:var(--accent);font-weight:600}
+.meta .seg-wrap{display:inline-flex;align-items:center;gap:8px}
 .warn{background:var(--warn-weak);color:var(--warn);border-left:3px solid var(--warn-line);border-radius:0 var(--r) var(--r) 0;padding:7px 12px;margin-top:10px;font-size:12px}
 
 /* панель запуска */
@@ -207,7 +213,7 @@ details summary:hover{color:var(--text)}
         <thead><tr>
           <th><input type="checkbox" id="all" title="Выбрать все"></th>
           <th>Название сделки</th>
-          <th>ФИО КР</th><th>Телефон КР</th><th>ФИО РК</th><th>Телефон РК</th>
+          <th id="hLeadName">ФИО КР</th><th id="hLeadPhone">Телефон КР</th><th>ФИО РК</th><th>Телефон РК</th>
           <th>Доп. информация</th><th>Статус</th><th></th>
         </tr></thead>
         <tbody id="rows"></tbody>
@@ -236,7 +242,20 @@ const store = {
   set(k, v){ try{ localStorage.setItem(k, v); }catch(e){} },
 };
 
-let deals = [], original = [], school = "";
+let deals = [], original = [], school = "", fileSchool = "", kind = "school", fileKind = "school";
+// школа: сделка «1а ВХТЛ-сп4», первый контакт КР; детский сад: «гр.11 1368-до4», первый контакт ВС
+const KIND = {
+  school:       {lead: "КР", place: "Школа",       units: "Классов"},
+  kindergarten: {lead: "ВС", place: "Детский сад", units: "Групп"},
+};
+const lead = () => KIND[kind].lead;
+function autoName(klass, place, k){
+  klass = String(klass ?? "").trim();
+  if(k === "kindergarten") klass = "гр." + klass.replace(/^гр(уппа)?\.?\s*/i, "");
+  return `${klass} ${place}`.trim();
+}
+// ФИО с заглавных букв: «диля халимовна» → «Диля Халимовна», «анна-мария» → «Анна-Мария»
+const fixNameCase = s => s.split(/(\s+)/).map(w => w.split("-").map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join("-")).join("");
 let S = {rows:{}, running:false, log:[]};
 const byId = id => deals.find(x => x.id === id);
 const isDone = d => d.done && d.doneStatus !== "partial";
@@ -270,12 +289,12 @@ function problems(d){
   const p = {};
   if(!d.name.trim()) p.name = "Пустое название";
   for(const who of ["kr","rk"]){
-    const c = d[who], label = who.toUpperCase() === "KR" ? "КР" : "РК";
+    const c = d[who], label = who === "kr" ? lead() : "РК";
     if(c.name.trim() && !c.phone.trim()) p[who+".phone"] = `Нет телефона ${label}`;
     if(c.phone.trim() && !PHONE_RE.test(c.phone.trim())) p[who+".phone"] = `Телефон ${label} не похож на +7XXXXXXXXXX`;
     if(!c.name.trim() && c.phone.trim()) p[who+".name"] = `Нет ФИО ${label}`;
   }
-  if(!d.kr.name.trim() && !d.kr.phone.trim()) p["kr.name"] = "Нет КР";
+  if(!d.kr.name.trim() && !d.kr.phone.trim()) p["kr.name"] = `Нет ${lead()}`;
   return p;
 }
 
@@ -300,27 +319,45 @@ async function upload(f){
   if(!r.ok){ alert(j.error); return; }
   j.deals.forEach(d => d.sel = !isDone(d) && !d.refused && !d.red);
   original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
+  fileSchool = school; kind = fileKind = j.kind === "kindergarten" ? "kindergarten" : "school";
   document.body.classList.add("loaded");
   $("#drop").innerHTML = '<span class="big-t">Другой файл…</span>';
   const refused = deals.filter(d => d.refused && !d.red).length, red = deals.filter(d => d.red).length, done = deals.filter(isDone).length;
   $("#meta").classList.remove("hidden");
   $("#meta").innerHTML = `<span class="fname" title="Загруженный отчёт">${esc(j.file)}</span>
-    <label>Школа <input id="school" value="${esc(school)}" title="Поменяет школу во всех названиях"></label>
-    <span>Классов: <b>${deals.length}</b></span>
+    <span class="seg-wrap" title="Определено по файлу. Меняет названия сделок и первый контакт (КР / ВС)">
+      <span class="seg" role="group" aria-label="Тип учреждения">
+        <button type="button" data-kind="school">Школа</button><button type="button" data-kind="kindergarten">Детский сад</button>
+      </span></span>
+    <label><span id="placeLbl"></span> <input id="school" value="${esc(school)}" title="Поменяет название во всех сделках"></label>
+    <span><span id="unitsLbl"></span>: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
     ${red ? `<span>Красные в файле: <b>${red}</b> (не отмечены)</span>` : ""}
     ${refused ? `<span>Похоже на отказ: <b>${refused}</b> (не отмечены)</span>` : ""}`;
-  $("#school").onchange = e => renameSchool(e.target.value.trim());
+  $("#school").onchange = e => rename(e.target.value.trim(), kind);
+  document.querySelectorAll(".seg [data-kind]").forEach(b => b.onclick = () => rename(school, b.dataset.kind));
+  applyKindUI();
   $("#warnings").innerHTML = j.warnings.length ? `<div class="warn">${j.warnings.map(esc).join("<br>")}</div>` : "";
   $("#actionCard").classList.remove("hidden"); $("#tableCard").classList.remove("hidden");
   renderRows();
 }
 
-function renameSchool(newSchool){
+// новое название учреждения или тип: переименовать сделки, у которых название не правили вручную
+function rename(newSchool, newKind){
+  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); applyKindUI(); return; }
   for(const d of deals){
-    if(d.name === `${d.klass} ${school}`.trim()) d.name = `${d.klass} ${newSchool}`.trim();
+    if(d.name === autoName(d.klass, school, kind)) d.name = autoName(d.klass, newSchool, newKind);
   }
-  school = newSchool; renderRows();
+  school = newSchool; kind = newKind;
+  applyKindUI(); renderRows();
+}
+function applyKindUI(){
+  const K = KIND[kind];
+  document.querySelectorAll(".seg [data-kind]").forEach(b => b.setAttribute("aria-pressed", b.dataset.kind === kind));
+  if($("#placeLbl")) $("#placeLbl").textContent = K.place;
+  if($("#unitsLbl")) $("#unitsLbl").textContent = K.units;
+  $("#hLeadName").textContent = `ФИО ${K.lead}`;
+  $("#hLeadPhone").textContent = `Телефон ${K.lead}`;
 }
 
 // ---------- таблица ----------
@@ -335,7 +372,7 @@ function renderRows(){
       <td><input type="checkbox" class="sel" ${d.sel?'checked':''}></td>
       <td class="name" title="${esc(d.sheet)}, строка ${d.row}">${inp("name", d.name)}</td>
       <td>${inp("kr.name", d.kr.name)}</td>
-      <td><div class="cell">${inp("kr.phone", d.kr.phone)}<button class="x" data-clear="kr" title="Убрать КР из этой сделки"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div></td>
+      <td><div class="cell">${inp("kr.phone", d.kr.phone)}<button class="x" data-clear="kr" title="Убрать ${lead()} из этой сделки"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div></td>
       <td>${inp("rk.name", d.rk.name)}</td>
       <td><div class="cell">${inp("rk.phone", d.rk.phone)}<button class="x" data-clear="rk" title="Убрать РК из этой сделки"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div></td>
       <td class="info" title="${esc(d.red ? 'Строка помечена в файле красным — по умолчанию не создаётся. ' : '')}${esc(d.info)}">${d.red ? '<span class="badge b-red">красная в файле</span>' : ''}${d.refused ? '<span class="badge b-ref">отказ?</span>' : ''}<div>${esc(d.info)}</div></td>
@@ -366,6 +403,12 @@ $("#rows").addEventListener("input", e => {
   markProblems(d); updateUI();
 });
 $("#rows").addEventListener("change", e => {
+  const f = e.target.dataset.f;
+  if(f === "kr.name" || f === "rk.name"){  // ФИО — с заглавных букв
+    const d = byId(e.target.closest("tr").dataset.id), fixed = fixNameCase(e.target.value);
+    if(fixed !== e.target.value){ e.target.value = fixed; d[f.split(".")[0]].name = fixed; markProblems(d); }
+    return;
+  }
   if(!e.target.classList.contains("sel")) return;
   const d = byId(e.target.closest("tr").dataset.id); d.sel = e.target.checked;
   markProblems(d); updateUI();
@@ -399,7 +442,8 @@ $("#all").onchange = e => {
 $("#btnRestore").onclick = () => {
   if(S.running) return;
   if(!confirm("Вернуть все строки и значения как в файле? Ваши правки пропадут.")) return;
-  deals = clone(original); renderRows();
+  deals = clone(original); kind = fileKind; school = fileSchool;
+  applyKindUI(); renderRows();
 };
 $("#btnClear").onclick = () => {
   if(S.running) return;
@@ -457,7 +501,7 @@ const plural = (n, one, few, many) => (n%10===1 && n%100!==11) ? one : (n%10>=2 
 
 // ---------- запуск ----------
 async function run(list){
-  const items = list.map(d => ({ id: d.id, name: d.name.trim(), contacts: [{role:"КР", ...d.kr}, {role:"РК", ...d.rk}] }));
+  const items = list.map(d => ({ id: d.id, name: d.name.trim(), contacts: [{role: lead(), ...d.kr}, {role:"РК", ...d.rk}] }));
   if(items.some(i => !i.name)){ alert("У некоторых сделок пустое название"); return; }
   const pipeline = $("#pipeline").value;
   if(!pipeline){ alert("Выберите воронку"); return; }
