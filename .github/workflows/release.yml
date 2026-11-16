@@ -1,5 +1,5 @@
 # Сборка SdelkiAmoCRM.exe и публикация в Releases.
-# Запуск: отправить тег вида v1.0.1 (git tag v1.0.1 && git push origin v1.0.1)
+# Запуск: отправить тег вида v1.0.2 (git tag v1.0.2 && git push origin v1.0.2)
 name: Release exe
 
 on:
@@ -14,9 +14,9 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -26,22 +26,24 @@ jobs:
       - name: Сборка exe
         run: pyinstaller --noconfirm --clean SdelkiAmoCRM.spec
 
-      - name: Проверка, что exe собран
+      - name: Проверка, что exe собран и версия совпадает с тегом
+        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $exe = Get-Item dist/SdelkiAmoCRM.exe
           "Размер: {0:N1} МБ" -f ($exe.Length / 1MB)
+          $ver = (Select-String -Path paths.py -Pattern 'VERSION = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$ver" -ne "${{ github.ref_name }}") { throw "VERSION в paths.py ($ver) не совпадает с тегом ${{ github.ref_name }}" }
 
       - name: Публикация релиза
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/SdelkiAmoCRM.exe
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/SdelkiAmoCRM.exe --title "${{ github.ref_name }}" --generate-notes
 
       - name: Exe как артефакт (ручной запуск)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SdelkiAmoCRM
           path: dist/SdelkiAmoCRM.exe
