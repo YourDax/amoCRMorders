@@ -81,11 +81,11 @@ build.bat
 Новый релиз: поднять `VERSION` в `paths.py`, закоммитить и отправить тег — GitHub Actions соберёт установщик и опубликует релиз.
 
 ```bash
-git tag v1.0.7
+git tag v1.0.8
 ```
 
 ```bash
-git push origin v1.0.7
+git push origin v1.0.8
 ```
 
 Файлы:
