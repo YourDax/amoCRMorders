@@ -4,120 +4,174 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Сделки в amoCRM</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6fed'/%3E%3Cpath d='M9 16.5l4.5 4.5L23 11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='3' fill='%231d5fa8'/%3E%3Cpath d='M8 9h16M8 16h16M8 23h10' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
 <style>
+/* Рабочий инструмент: плотно, спокойно, как офисная программа.
+   Плоские панели, минимальные скругления, таблица как лист Excel. */
 :root{
-  --bg:#f4f6f9; --card:#fff; --text:#1d2330; --muted:#6b7385; --line:#e3e7ee;
-  --accent:#2f6fed; --accent-2:#e9f0fe; --ok:#1f9d55; --ok-bg:#e6f6ec; --err:#d64545; --err-bg:#fdecec;
-  --warn:#b7791f; --warn-bg:#fdf6e3; --input:#fff;
+  --bg:#efefec; --surface:#fff; --head:#f6f6f4; --hover:#f3f5f8;
+  --text:#1c1c1c; --muted:#5f5f5c; --faint:#8b8b87;
+  --line:#dededa; --line-2:#c6c6c1;
+  --accent:#1d5fa8; --accent-hover:#174d8a; --accent-weak:#e6edf6;
+  --ok:#1d7a3b; --err:#b3261e; --err-weak:#fbeceb;
+  --warn:#7d5500; --warn-weak:#fdf3d8; --warn-line:#e2c470;
+  --input:#fff; --r:3px;
+  color-scheme:light;
 }
 @media (prefers-color-scheme: dark){
-  :root{ --bg:#141a24; --card:#1c2431; --text:#e6e9ef; --muted:#9aa3b5; --line:#2c3646;
-    --accent:#5b8ff9; --accent-2:#233453; --ok:#4cc38a; --ok-bg:#183326; --err:#f07171; --err-bg:#3a1f22;
-    --warn:#e3b341; --warn-bg:#3a321b; --input:#151c27; }
+  :root{
+    --bg:#18191b; --surface:#212225; --head:#26272b; --hover:#2a2d33;
+    --text:#e6e6e3; --muted:#a2a29e; --faint:#7a7a76;
+    --line:#323338; --line-2:#45464c;
+    --accent:#4f8fd6; --accent-hover:#6aa2e0; --accent-weak:#1f2f44;
+    --ok:#5cb87a; --err:#ef7b72; --err-weak:#3a2220;
+    --warn:#e0b44d; --warn-weak:#352c17; --warn-line:#6e5a26;
+    --input:#1b1c1f;
+    color-scheme:dark;
+  }
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-header{display:flex;align-items:center;gap:14px;padding:12px 24px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-header h1{font-size:17px;margin:0;font-weight:650}
+html{-webkit-font-smoothing:antialiased}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:13px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Roboto,sans-serif;
+  font-variant-numeric:tabular-nums}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* шапка */
+header{display:flex;align-items:center;gap:16px;height:44px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--line-2);position:sticky;top:0;z-index:5}
+header h1{font-size:14px;margin:0;font-weight:600;letter-spacing:.1px}
 .spacer{flex:1}
-.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;font-size:12px;background:var(--line);color:var(--muted);border:none;cursor:pointer}
-.pill.on{background:var(--ok-bg);color:var(--ok);cursor:default}
-.pill::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
-main{max-width:1440px;margin:0 auto;padding:18px 24px 40px;display:grid;gap:14px}
+#ver{color:var(--faint);font-size:12px}
+.status-conn{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 10px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--muted);font:inherit;font-size:12px;cursor:pointer;transition:border-color .15s,color .15s}
+.status-conn::before{content:"";width:7px;height:7px;border-radius:1px;background:var(--faint)}
+.status-conn:hover{border-color:var(--accent);color:var(--text)}
+.status-conn.on{border-color:transparent;color:var(--ok);cursor:default;padding-left:0}
+.status-conn.on::before{background:var(--ok)}
+
+main{padding:14px 20px 32px;display:grid;gap:12px}
 main>*{min-width:0}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
-button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);padding:8px 14px;border-radius:8px;cursor:pointer}
-button:hover:not(:disabled){border-color:var(--accent)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+.panel-body{padding:12px 14px}
+
+/* кнопки и поля */
+button{font:inherit;height:30px;padding:0 12px;border:1px solid var(--line-2);background:var(--surface);color:var(--text);border-radius:var(--r);cursor:pointer;transition:background-color .15s,border-color .15s,color .15s}
+button:hover:not(:disabled){border-color:var(--muted)}
+button:active:not(:disabled){background:var(--head)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-button.big{padding:11px 22px;font-size:15px}
+button.primary:hover:not(:disabled){background:var(--accent-hover);border-color:var(--accent-hover)}
+button.big{height:34px;padding:0 18px}
 button.danger{color:var(--err);border-color:var(--err)}
-button.link{border:none;background:none;color:var(--accent);padding:4px 6px}
+button.danger:hover:not(:disabled){background:var(--err-weak);border-color:var(--err)}
+button.link{border:none;background:none;color:var(--accent);padding:0 6px;height:26px}
+button.link:hover:not(:disabled){text-decoration:underline;background:none}
 button:disabled{opacity:.45;cursor:not-allowed}
-select,.meta input{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--text)}
+select,.meta input{font:inherit;height:30px;padding:0 8px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--input);color:var(--text)}
+select{min-width:220px;padding-right:4px}
+input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px;margin:0;vertical-align:middle}
 
 /* загрузка */
-#drop{border:2px dashed var(--line);border-radius:12px;padding:46px 20px;text-align:center;color:var(--muted);cursor:pointer;transition:.15s}
-#drop.over,#drop:hover{border-color:var(--accent);background:var(--accent-2);color:var(--text)}
-#drop .big-t{font-size:17px;color:var(--text);font-weight:600;margin-bottom:4px}
-body.loaded #drop{padding:10px;font-size:13px}
-body.loaded #drop .big-t{font-size:13px;display:inline;margin-right:6px}
-.meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;margin-top:12px;color:var(--muted)}
-.meta b{color:var(--text)}
-.meta input{width:150px;padding:5px 8px}
-.warn{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:8px 12px;margin-top:10px;font-size:13px}
+#drop{border:1px dashed var(--line-2);border-radius:var(--r);padding:34px 20px;text-align:center;color:var(--muted);cursor:pointer;background:var(--head);transition:border-color .15s,background-color .15s}
+#drop.over,#drop:hover{border-color:var(--accent);background:var(--accent-weak);color:var(--text)}
+#drop .big-t{font-size:15px;color:var(--text);font-weight:600;margin-bottom:2px}
+body.loaded #drop{padding:0 12px;height:30px;display:inline-flex;align-items:center;gap:6px;font-size:12px;border-style:solid;background:var(--surface)}
+body.loaded #drop .big-t{font-size:12px;font-weight:600;margin:0;color:var(--accent)}
+.filebar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px}
+body:not(.loaded) .filebar{display:block}
+.meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 0;color:var(--muted)}
+.meta>*{padding:0 14px;border-left:1px solid var(--line)}
+.meta>*:first-child{border-left:none;padding-left:0}
+.meta b{color:var(--text);font-weight:600}
+.meta .fname{color:var(--text);font-weight:600}
+.meta label{display:inline-flex;align-items:center;gap:8px}
+.meta input{width:150px;height:26px}
+.warn{background:var(--warn-weak);color:var(--warn);border-left:3px solid var(--warn-line);border-radius:0 var(--r) var(--r) 0;padding:7px 12px;margin-top:10px;font-size:12px}
 
-/* панель действия */
-.action{display:flex;flex-wrap:wrap;align-items:center;gap:12px 18px}
-.action label{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
-#progress{display:none;margin-top:14px}
+/* панель запуска */
+.action{display:flex;flex-wrap:wrap;align-items:center;gap:10px 20px}
+.action label{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+.action .lbl{color:var(--muted)}
+#progress{display:none;margin-top:12px}
 #progress.show{display:block}
-.bar{height:8px;background:var(--line);border-radius:999px;overflow:hidden}
-.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
-.ptext{display:flex;gap:12px;align-items:center;margin-top:8px;font-size:13px;color:var(--muted)}
+.bar{height:4px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s ease-out}
+.ptext{display:flex;gap:14px;align-items:center;margin-top:6px;font-size:12px;color:var(--muted)}
 .ptext b{color:var(--text)}
 #lastLog{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#waiting{display:none;margin-top:12px;background:var(--warn-bg);border:1px solid var(--warn);border-radius:10px;padding:10px 14px;align-items:center;gap:12px}
+#waiting{display:none;margin-top:12px;background:var(--warn-weak);border-left:3px solid var(--warn-line);padding:8px 12px;align-items:center;gap:12px}
 #waiting.show{display:flex}
-#waiting span{flex:1}
+#waiting span{flex:1;color:var(--text)}
 
 /* таблица */
 .tablewrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;min-width:1050px}
-th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
-th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap;padding-top:2px}
-th:nth-child(3),td:nth-child(3),th:nth-child(5),td:nth-child(5),th:nth-child(7),td:nth-child(7){border-left:1px solid var(--line);padding-left:10px}
-td input[type=text]{width:100%;padding:6px 8px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--text);font:inherit}
-td input[type=text]:hover{border-color:var(--line)}
-td input[type=text]:focus{outline:none;border-color:var(--accent);background:var(--input)}
-td input.bad{border-color:var(--warn);background:var(--warn-bg)}
+th,td{padding:0 6px;height:32px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+thead th{position:sticky;top:0;background:var(--head);height:30px;font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--line-2)}
+th:first-child,td:first-child{width:34px;text-align:center;padding:0 0 0 4px}
+th:nth-child(3),td:nth-child(3),th:nth-child(5),td:nth-child(5),th:nth-child(7),td:nth-child(7),th:nth-child(8),td:nth-child(8){border-left:1px solid var(--line)}
+tbody tr:hover td{background:var(--hover)}
+td input[type=text]{width:100%;height:26px;padding:0 6px;border:1px solid transparent;border-radius:2px;background:transparent;color:var(--text);font:inherit}
+td input[type=text]:hover{border-color:var(--line-2)}
+td input[type=text]:focus{outline:none;border-color:var(--accent);background:var(--input);box-shadow:0 0 0 1px var(--accent)}
+td input.bad{border-color:var(--warn-line);background:var(--warn-weak)}
 td.name input{font-weight:600}
-td.info{font-size:12px;color:var(--muted);max-width:190px}
+td.info{font-size:12px;color:var(--muted);max-width:200px}
 td.info div{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td.info .badge{margin-right:8px}
 tr.done td{opacity:.55}
 tr.done td.status{opacity:1}
 tr.off td:not(:first-child):not(.status):not(:last-child){opacity:.5}
-.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;white-space:nowrap}
-.b-ok{background:var(--ok-bg);color:var(--ok)} .b-err{background:var(--err-bg);color:var(--err)}
-.b-work{background:var(--accent-2);color:var(--accent)} .b-q{background:var(--line);color:var(--muted)}
-.b-part,.b-ref{background:var(--warn-bg);color:var(--warn)}
-.b-red{background:var(--err-bg);color:var(--err)}
+tr.red td:first-child{box-shadow:inset 3px 0 0 var(--err)}
 tr.red td.name input{color:var(--err)}
-td.status{min-width:120px}
-td.status a{color:var(--accent);font-size:12px;margin-left:4px}
-td.status .err{display:block;color:var(--err);font-size:12px;max-width:240px}
+
+/* статусы: текст с квадратным маркером, без «пилюль» */
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;color:var(--muted)}
+.badge::before{content:"";width:7px;height:7px;border-radius:1px;background:currentColor;flex:none}
+.b-ok{color:var(--ok)} .b-err,.b-red{color:var(--err)}
+.b-work{color:var(--accent)} .b-q{color:var(--faint)}
+.b-part,.b-ref{color:var(--warn)}
+.b-work::before{animation:blink 1s steps(2,start) infinite}
+@keyframes blink{to{opacity:.25}}
+@media (prefers-reduced-motion: reduce){ .b-work::before{animation:none} .bar i{transition:none} }
+td.status{min-width:190px}
+td.status a{color:var(--accent);font-size:12px;margin-left:8px;text-decoration:none;white-space:nowrap}
+td.status a:hover{text-decoration:underline}
+td.status .err{display:block;color:var(--err);font-size:11px;line-height:1.3;max-width:240px;padding-bottom:3px;text-wrap:pretty}
 .cell{display:flex;align-items:center;gap:2px}
-button.x{border:none;background:transparent;color:var(--muted);padding:4px 7px;border-radius:6px;font-size:15px;line-height:1}
-button.x:hover{background:var(--err-bg);color:var(--err)}
-.below{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-top:10px;color:var(--muted);font-size:13px}
-.empty{color:var(--muted);text-align:center;padding:30px}
+button.x{display:inline-grid;place-items:center;flex:none;width:24px;height:24px;padding:0;border:none;background:transparent;color:var(--faint);border-radius:2px}
+button.x svg{width:14px;height:14px;pointer-events:none}
+button.x:hover:not(:disabled){background:var(--err-weak);color:var(--err)}
+.below{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;padding:8px 14px;border-top:1px solid var(--line);background:var(--head);color:var(--muted);font-size:12px}
+.empty{color:var(--muted);text-align:center;padding:30px;height:auto}
 .hidden{display:none !important}
-details summary{cursor:pointer;color:var(--muted);font-size:13px}
-#log{font:12px/1.5 ui-monospace,Consolas,monospace;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:10px;height:240px;overflow:auto;white-space:pre-wrap;margin:10px 0 0}
-@media (max-width:700px){ header{flex-wrap:wrap;padding:10px 16px} main{padding:14px 16px} }
+details summary{cursor:pointer;color:var(--muted);font-size:12px;padding:8px 14px;user-select:none}
+details summary:hover{color:var(--text)}
+#log{font:12px/1.5 "Cascadia Mono",Consolas,ui-monospace,monospace;background:var(--input);border-top:1px solid var(--line);padding:10px 14px;height:240px;overflow:auto;white-space:pre-wrap;margin:0}
+@media (max-width:700px){ header{padding:0 16px} main{padding:12px 16px} .meta>*{padding:0 10px} select{min-width:0;max-width:100%} }
 </style>
 </head>
 <body>
 <header>
   <h1>Сделки в amoCRM</h1>
-  <button id="conn" class="pill" title="Открыть окно amoCRM и войти">amoCRM: войти</button>
+  <button id="conn" class="status-conn" title="Открыть окно amoCRM и войти">amoCRM: войти</button>
   <div class="spacer"></div>
-  <span id="ver" style="color:var(--muted);font-size:12px"></span>
+  <span id="ver"></span>
 </header>
 
 <main>
   <!-- 1. файл -->
-  <section class="card">
-    <div id="drop"><div class="big-t">Перетащите сюда отчёт .xlsx</div>или нажмите, чтобы выбрать файл</div>
+  <section class="panel panel-body">
+    <div class="filebar">
+      <div id="drop"><div class="big-t">Перетащите сюда отчёт .xlsx</div>или нажмите, чтобы выбрать файл</div>
+      <div class="meta hidden" id="meta"></div>
+    </div>
     <input type="file" id="file" accept=".xlsx" hidden>
-    <div class="meta hidden" id="meta"></div>
     <div id="warnings"></div>
   </section>
 
   <!-- 2. действие -->
-  <section class="card hidden" id="actionCard">
+  <section class="panel panel-body hidden" id="actionCard">
     <div class="action">
-      <label>Воронка <select id="pipeline"></select></label>
+      <label><span class="lbl">Воронка</span> <select id="pipeline"></select></label>
       <label title="Перед каждым «Сохранить» бот остановится, чтобы вы проверили форму"><input type="checkbox" id="step"> Проверять перед сохранением</label>
       <div class="spacer"></div>
       <button class="danger hidden" id="btnStop">Стоп</button>
@@ -131,7 +185,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px}
   </section>
 
   <!-- 3. таблица -->
-  <section class="card hidden" id="tableCard">
+  <section class="panel hidden" id="tableCard">
     <div class="tablewrap">
       <table>
         <thead><tr>
@@ -144,7 +198,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px}
       </table>
     </div>
     <div class="below">
-      <span>Ячейки можно править. «×» у телефона — убрать контакт, 🗑 — убрать строку.</span>
+      <span>Ячейки можно править. × у телефона убирает контакт, корзина — строку.</span>
       <div class="spacer"></div>
       <button class="link hidden" id="btnRetry">Повторить ошибочные</button>
       <button class="link" id="btnRestore">Вернуть как в файле</button>
@@ -152,7 +206,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px}
     </div>
   </section>
 
-  <section class="card">
+  <section class="panel">
     <details id="logBox"><summary>Подробный журнал</summary><pre id="log"></pre></details>
   </section>
 </main>
@@ -215,10 +269,10 @@ async function upload(f){
   j.deals.forEach(d => d.sel = !isDone(d) && !d.refused && !d.red);
   original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
   document.body.classList.add("loaded");
-  $("#drop").innerHTML = '<span class="big-t">Другой файл</span> — перетащите или нажмите';
+  $("#drop").innerHTML = '<span class="big-t">Другой файл…</span>';
   const refused = deals.filter(d => d.refused && !d.red).length, red = deals.filter(d => d.red).length, done = deals.filter(isDone).length;
   $("#meta").classList.remove("hidden");
-  $("#meta").innerHTML = `<span>📄 <b>${esc(j.file)}</b></span>
+  $("#meta").innerHTML = `<span class="fname" title="Загруженный отчёт">${esc(j.file)}</span>
     <label>Школа <input id="school" value="${esc(school)}" title="Поменяет школу во всех названиях"></label>
     <span>Классов: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
@@ -249,12 +303,12 @@ function renderRows(){
       <td><input type="checkbox" class="sel" ${d.sel?'checked':''}></td>
       <td class="name" title="${esc(d.sheet)}, строка ${d.row}">${inp("name", d.name)}</td>
       <td>${inp("kr.name", d.kr.name)}</td>
-      <td><div class="cell">${inp("kr.phone", d.kr.phone)}<button class="x" data-clear="kr" title="Убрать КР из этой сделки">×</button></div></td>
+      <td><div class="cell">${inp("kr.phone", d.kr.phone)}<button class="x" data-clear="kr" title="Убрать КР из этой сделки"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div></td>
       <td>${inp("rk.name", d.rk.name)}</td>
-      <td><div class="cell">${inp("rk.phone", d.rk.phone)}<button class="x" data-clear="rk" title="Убрать РК из этой сделки">×</button></div></td>
-      <td class="info" title="${esc(d.red ? 'Строка помечена в файле красным — по умолчанию не создаётся. ' : '')}${esc(d.info)}">${d.red ? '<span class="badge b-red">красная в файле</span> ' : ''}${d.refused ? '<span class="badge b-ref">отказ?</span> ' : ''}<div>${esc(d.info)}</div></td>
+      <td><div class="cell">${inp("rk.phone", d.rk.phone)}<button class="x" data-clear="rk" title="Убрать РК из этой сделки"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div></td>
+      <td class="info" title="${esc(d.red ? 'Строка помечена в файле красным — по умолчанию не создаётся. ' : '')}${esc(d.info)}">${d.red ? '<span class="badge b-red">красная в файле</span>' : ''}${d.refused ? '<span class="badge b-ref">отказ?</span>' : ''}<div>${esc(d.info)}</div></td>
       <td class="status"></td>
-      <td><button class="x" data-del title="Убрать строку из списка">🗑</button></td>
+      <td><button class="x" data-del title="Убрать строку из списка"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v5M9.2 6.5v5"/></svg></button></td>
     </tr>`;
   }).join("");
   deals.forEach(markProblems);
@@ -335,7 +389,7 @@ function paintStatuses(){
     }
     let html = "";
     const url = s.url || d.done;
-    if(s.status === "ok") html = '<span class="badge b-ok">✓ создана</span>';
+    if(s.status === "ok") html = '<span class="badge b-ok">создана</span>';
     else if(s.status === "skip") html = '<span class="badge b-ok">уже была</span>';
     else if(s.status === "work") html = '<span class="badge b-work">создаётся…</span>';
     else if(s.status === "queued") html = '<span class="badge b-q">в очереди</span>';
