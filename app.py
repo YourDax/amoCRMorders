@@ -396,7 +396,7 @@ def main():
     threading.Thread(target=worker, daemon=True).start()
     if paths.FROZEN:
         threading.Thread(target=idle_watchdog, daemon=True).start()
-        first_run_shortcut()
+        # ярлыки на рабочем столе и в «Пуске» создаёт установщик (installer.iss)
     print(f"Приложение работает: {url}")
     if "--no-open" not in sys.argv:
         threading.Timer(1.0, lambda: open_ui(url)).start()
@@ -410,19 +410,6 @@ def idle_watchdog():
         time.sleep(15)
         if not S.running and time.time() - _last_seen > IDLE_EXIT_SEC:
             os._exit(0)  # фоновый браузер amoCRM закроется вместе с процессом
-
-
-def first_run_shortcut():
-    """При первом запуске exe кладёт ярлык «Сделки amoCRM» на рабочий стол."""
-    flag = paths.DATA_DIR / ".shortcut_created"
-    if flag.exists():
-        return
-    try:
-        import make_shortcut
-        if make_shortcut.create(Path(sys.executable)):
-            flag.write_text("1", encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def message_box(text: str):
