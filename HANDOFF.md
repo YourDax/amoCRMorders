@@ -1,5 +1,21 @@
 # HANDOFF
 
+## 2026-11-16 — релиз v1.0.1 (обновление сборки)
+
+**Сделано**
+- `.github/workflows/release.yml`: `actions/checkout@v7`, `actions/setup-python@v7`, `actions/upload-artifact@v7` (Node 24, предупреждение о Node 20 ушло); релиз публикуется встроенным `gh release create` вместо стороннего action; сборка падает, если `VERSION` в `paths.py` не совпадает с тегом.
+- `paths.py`: `VERSION = "1.0.1"`. README: пример тега обновлён на v1.0.2.
+- Релиз: https://github.com/YourDax/amoCRMorders/releases/tag/v1.0.1 — один `SdelkiAmoCRM.exe` (55,9 МБ), сборка run 43812788602 за 1 мин 23 с.
+
+**Проверено**
+- Exe из релиза v1.0.1 на макете amoCRM с отдельной временной папкой данных (`LOCALAPPDATA` подменён): версия 1.0.1, сделка с КР и РК создана. Временные файлы удалены, настоящая `%LOCALAPPDATA%\amoCRMorders` не затронута.
+
+**Не проверено / открыто**
+- Живой amoCRM (РК, «Название компании», дозаполнение) и запуск на чистом компьютере.
+
+**Следующий шаг**
+- Следующая версия: `VERSION = "1.0.2"` в `paths.py`, коммит, `git tag v1.0.2 && git push origin v1.0.2`.
+
 ## 2026-11-15 — один exe, GitHub-репозиторий и релизы (v1.0.0)
 
 **Сделано**
