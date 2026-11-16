@@ -490,7 +490,7 @@ async function poll(){
   try{
     S = await (await fetch("/api/status")).json();
   }catch(e){
-    $("#conn").textContent = "приложение закрыто — запустите run.bat"; $("#conn").classList.remove("on"); return;
+    $("#conn").textContent = "программа закрыта — запустите её снова"; $("#conn").classList.remove("on"); return;
   }
   fillPipelines(S.pipelines || []);
   if(S.version) $("#ver").textContent = "версия " + S.version;
@@ -514,6 +514,12 @@ async function poll(){
   paintStatuses(); updateUI();
 }
 setInterval(poll, 1000); poll();
+
+// закрытие окна = выход из программы; если идёт создание сделок — сначала спросить
+window.addEventListener("beforeunload", e => {
+  const busy = S.running && !S.waiting && S.total > 0 && S.doneN + S.failedN < S.total;
+  if(busy){ e.preventDefault(); e.returnValue = ""; }  // идёт создание сделок — спросить
+});
 </script>
 </body>
 </html>

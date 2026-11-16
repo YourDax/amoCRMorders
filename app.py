@@ -34,7 +34,8 @@ CONFIG = paths.load_config()
 PROGRESS = paths.PROGRESS_FILE
 UPLOADS = paths.UPLOADS_DIR
 LOG_DIR = paths.LOG_DIR
-IDLE_EXIT_SEC = 180  # окно приложения закрыто так долго (и бот не работает) — выходим
+IDLE_EXIT_SEC = 180  # запасной вариант, если процесс окна не найден: окно молчит так долго — выходим
+WINDOW_PROFILE = paths.DATA_DIR / "app-window"  # отдельный профиль браузера для окна программы
 
 app = Flask(__name__, static_folder=str(paths.STATIC_DIR))
 _last_seen = time.time()  # когда окно приложения последний раз обращалось к серверу
@@ -356,9 +357,11 @@ def api_status():
                        pipelines=S.pipelines, total=S.total, doneN=S.done_n, failedN=S.failed_n)
 
 
-def open_ui(url: str):
+def open_ui(url: str) -> bool:
     """Открывает интерфейс отдельным окном без адресной строки (как приложение).
-    Если Edge/Chrome не найдены — обычной вкладкой браузера."""
+    Окно запускается в своём профиле браузера, поэтому у него свой процесс: он живёт,
+    пока открыто окно, и по нему программа понимает, что её закрыли (см. close_with_window).
+    Если Edge/Chrome не найдены — обычной вкладкой браузера (возвращает False)."""
     import subprocess
     candidates = [
         os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
@@ -370,11 +373,56 @@ def open_ui(url: str):
     for exe in candidates:
         if os.path.exists(exe):
             try:
-                subprocess.Popen([exe, f"--app={url}", "--window-size=1400,900"])
-                return
+                subprocess.Popen([exe, f"--app={url}", "--window-size=1400,900",
+                                  f"--user-data-dir={WINDOW_PROFILE}",
+                                  "--no-first-run", "--no-default-browser-check"])
+                return True
             except OSError:
                 continue
     webbrowser.open(url)
+    return False
+
+
+def find_window_process() -> int | None:
+    """PID главного процесса браузера с окном программы (ищется по профилю окна)."""
+    import subprocess
+    prof = str(WINDOW_PROFILE).lower()
+    ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | "
+          "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=20,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    for line in out.splitlines():
+        pid, _, cmd = line.partition("\t")
+        cmd = cmd.lower()
+        if prof in cmd and "--type=" not in cmd and pid.strip().isdigit():
+            return int(pid)
+    return None
+
+
+def close_with_window():
+    """Программа живёт, пока открыто её окно: закрыли окно — процесс браузера окна
+    завершился — выходим сразу (вместе с ботом, драйвером Playwright и браузером amoCRM).
+    Процесс окна ищется один раз при запуске, дальше — ожидание средствами Windows, без опросов."""
+    import ctypes
+    pid = None
+    for _ in range(20):  # окну нужно пару секунд, чтобы запуститься
+        time.sleep(1)
+        pid = find_window_process()
+        if pid:
+            break
+    k32 = ctypes.windll.kernel32
+    handle = k32.OpenProcess(0x00100000, False, pid) if pid else None  # SYNCHRONIZE
+    if not handle:
+        S.add_log("Не нашёл окно программы — закроюсь, когда окно перестанет обращаться к программе.")
+        idle_watchdog()
+        return
+    k32.WaitForSingleObject(handle, 0xFFFFFFFF)  # ждём закрытия окна
+    S.add_log("Окно программы закрыто — завершаю работу.")
+    os._exit(0)
 
 
 def port_busy(port: int) -> bool:
@@ -396,21 +444,25 @@ def main():
             open_ui(url)
         return
     threading.Thread(target=worker, daemon=True).start()
-    if paths.FROZEN:
-        threading.Thread(target=idle_watchdog, daemon=True).start()
-        # ярлыки на рабочем столе и в «Пуске» создаёт установщик (installer.iss)
+    # ярлыки на рабочем столе и в «Пуске» создаёт установщик (installer.iss)
     print(f"Приложение работает: {url}")
     if "--no-open" not in sys.argv:
-        threading.Timer(1.0, lambda: open_ui(url)).start()
+        def start_window():
+            time.sleep(1.0)
+            if open_ui(url):
+                close_with_window()
+            elif paths.FROZEN:
+                idle_watchdog()
+        threading.Thread(target=start_window, daemon=True).start()
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
 
 
 def idle_watchdog():
-    """У exe нет консоли, которую можно закрыть. Поэтому программа завершается сама,
-    когда окно приложения закрыто (страница перестала опрашивать сервер) и бот не работает."""
+    """Запасной вариант, когда процесс окна неизвестен (нет Edge/Chrome): выходим, если окно
+    давно не обращалось к программе, а бот не работает или стоит на паузе «Проверьте форму»."""
     while True:
         time.sleep(15)
-        if not S.running and time.time() - _last_seen > IDLE_EXIT_SEC:
+        if time.time() - _last_seen > IDLE_EXIT_SEC and (not S.running or S.waiting):
             os._exit(0)  # фоновый браузер amoCRM закроется вместе с процессом
 
 

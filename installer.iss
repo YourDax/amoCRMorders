@@ -57,3 +57,27 @@ Name: "{userdesktop}\Сделки amoCRM"; Filename: "{app}\SdelkiAmoCRM.exe"; T
 
 [Run]
 Filename: "{app}\SdelkiAmoCRM.exe"; Description: "Запустить «Сделки amoCRM»"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Старая копия программы могла остаться запущенной (её сервер, драйвер Playwright и браузер amoCRM).
+// Её файлы заняты, и обновление не встаёт. Закрываем её вместе с дочерними процессами.
+procedure CloseRunningApp();
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM SdelkiAmoCRM.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if Code = 0 then
+    Sleep(1500);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  CloseRunningApp();
+  Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  CloseRunningApp();
+  Result := True;
+end;
