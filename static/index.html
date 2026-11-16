@@ -59,7 +59,8 @@ header h1{font-size:14px;margin:0;font-weight:600;letter-spacing:.1px}
 .status-conn{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 10px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--muted);font:inherit;font-size:12px;cursor:pointer;transition:border-color .15s,color .15s}
 .status-conn::before{content:"";width:7px;height:7px;border-radius:1px;background:var(--faint)}
 .status-conn:hover{border-color:var(--accent);color:var(--text)}
-.status-conn.on{border-color:transparent;color:var(--ok);cursor:default;padding-left:0}
+.status-conn.on{border-color:transparent;color:var(--ok)}
+.status-conn.on:hover{border-color:var(--line-2);color:var(--ok)}
 .status-conn.on::before{background:var(--ok)}
 
 main{padding:14px 20px 32px;display:grid;gap:12px}
@@ -471,7 +472,7 @@ $("#btnRun").onclick = () => run(selected());
 $("#btnRetry").onclick = () => run(failedRows());
 $("#btnStop").onclick = () => post("/api/stop");
 $("#btnContinue").onclick = () => post("/api/continue");
-$("#conn").onclick = () => { if(!S.loggedIn && !S.running) post("/api/login"); };
+$("#conn").onclick = () => { if(S.phase !== "run") post("/api/login"); };  // старое окно amoCRM закроется
 $("#step").checked = store.get("step") === "1";
 $("#step").onchange = e => store.set("step", e.target.checked ? "1" : "0");
 
@@ -495,8 +496,11 @@ async function poll(){
   fillPipelines(S.pipelines || []);
   if(S.version) $("#ver").textContent = "версия " + S.version;
   const conn = $("#conn");
-  conn.textContent = S.loggedIn ? "amoCRM подключена" : (S.running ? "amoCRM: вход…" : "amoCRM: войти");
+  conn.textContent = S.loggedIn ? "amoCRM подключена" : (S.phase === "login" ? "amoCRM: вход…" : "amoCRM: войти");
   conn.classList.toggle("on", S.loggedIn);
+  conn.disabled = S.phase === "run";
+  conn.title = S.phase === "run" ? "Идёт создание сделок"
+    : (S.loggedIn || S.phase === "login") ? "Открыть окно amoCRM заново (старое закроется)" : "Открыть окно amoCRM и войти";
   const log = $("#log"), atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 5;
   const txt = S.log.join("\n");
   if(log.textContent !== txt){ log.textContent = txt; if(atBottom) log.scrollTop = log.scrollHeight; }

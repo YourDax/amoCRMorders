@@ -31,6 +31,8 @@ from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 from excel_reader import Contact, Deal, read_deals  # noqa: E402
 
 CONFIG = paths.load_config()
+if os.environ.get("AMO_URL"):  # для проверок на макете amoCRM
+    CONFIG["amo_url"] = os.environ["AMO_URL"]
 PROGRESS = paths.PROGRESS_FILE
 UPLOADS = paths.UPLOADS_DIR
 LOG_DIR = paths.LOG_DIR
@@ -50,6 +52,8 @@ class State:
         self.running = False
         self.logged_in = False
         self.browser_open = False
+        self.phase: str | None = None      # "login" — открываем amoCRM / ждём входа, "run" — создаём сделки
+        self.relogin = False               # пользователь ещё раз нажал «войти» — прервать текущий вход
         self.waiting: str | None = None    # текст паузы в пошаговом режиме
         self.stop_flag = False
         self.continue_evt = threading.Event()
@@ -91,7 +95,7 @@ def save_progress(p: dict):
 # ---------------- фоновый поток с браузером ----------------
 def worker():
     """Все вызовы Playwright — только в этом потоке."""
-    from amo_bot import AmoBot
+    from amo_bot import AmoBot, BrowserClosed, is_closed_error
 
     bot: AmoBot | None = None
 
@@ -99,32 +103,38 @@ def worker():
         S.continue_evt.clear()
         S.waiting = msg
         S.add_log("⏸ " + msg)
-        while not S.continue_evt.wait(0.3):
-            if S.stop_flag:
-                S.waiting = None
-                raise RuntimeError("Остановлено пользователем")
-        S.waiting = None
+        try:
+            while not S.continue_evt.is_set():
+                if S.stop_flag:
+                    raise RuntimeError("Остановлено пользователем")
+                bot.wait(300)  # ждём через Playwright — так сразу видно, если окно amoCRM закрыли
+        finally:
+            S.waiting = None
+
+    def close_bot():
+        nonlocal bot
+        if bot is not None:
+            bot.stop()
+            bot = None
+        S.logged_in = S.browser_open = False
 
     def ensure_bot():
         nonlocal bot
         if bot is not None:
             try:
-                _ = bot.page.url
+                if bot.closed:
+                    raise BrowserClosed()
                 bot.page.title()
                 return bot
-            except Exception:
-                try:
-                    bot.stop()
-                except Exception:
-                    pass
-                bot = None
+            except Exception:  # noqa: BLE001 — окно закрыли, откроем заново
+                close_bot()
         S.add_log("Открываю браузер amoCRM...")
         bot = AmoBot(CONFIG["amo_url"], slow_mo=CONFIG.get("slow_mo_ms", 150))
         bot.log_cb = S.add_log
         bot.ui_pause = pause
         bot.start()
         S.browser_open = True
-        bot.ensure_logged_in(wait_minutes=10)
+        bot.ensure_logged_in(wait_minutes=10, cancelled=lambda: S.relogin)
         S.logged_in = True
         try:
             found = bot.list_pipelines()
@@ -137,22 +147,35 @@ def worker():
 
     while True:
         kind, payload = jobs.get()
+        S.running, S.phase = True, kind
         try:
             if kind == "login":
+                S.relogin = False
+                if bot is not None:  # новое окно amoCRM — старое закрываем
+                    S.add_log("Закрываю прежнее окно amoCRM.")
+                    close_bot()
                 ensure_bot()
             elif kind == "run":
                 run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""))
         except Exception as e:  # noqa: BLE001
-            S.add_log(f"❌ {str(e).splitlines()[0][:300]}")
-            S.logged_in = False
+            if is_closed_error(e) or (bot is not None and bot.closed):
+                S.add_log("Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
+                close_bot()
+            elif S.relogin:
+                S.add_log(str(e).splitlines()[0])
+            else:
+                S.add_log(f"❌ {str(e).splitlines()[0][:300]}")
+                S.logged_in = False
         finally:
-            S.running = False
+            S.phase = None
+            S.running = not jobs.empty()
 
 
 MAX_ERRORS_IN_ROW = 3  # столько ошибок подряд = что-то сломалось целиком, останавливаемся
 
 
 def run_deals(bot, items: list[dict], step: bool, pipeline: str):
+    from amo_bot import BrowserClosed, is_closed_error
     progress = load_progress()
     S.stop_flag = False
     S.running = True
@@ -196,6 +219,13 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
                 last_err = e
                 if "Остановлено пользователем" in str(e):
                     break
+                if is_closed_error(e) or bot.closed:  # окно amoCRM закрыли — повторять бессмысленно
+                    last_err = BrowserClosed()
+                    if state["url"]:
+                        progress[name] = {"url": state["url"], "status": "partial",
+                                          "contacts_done": state["contacts_done"], "at": time.strftime("%Y-%m-%d %H:%M")}
+                        save_progress(progress)
+                    break
                 shot = bot.screenshot(f"error-{name}")
                 msg = str(e).splitlines()[0][:300]
                 S.add_log(f"   ⚠ попытка {attempt}: {msg} (скриншот: {shot.name})")
@@ -218,6 +248,9 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
             S.add_log("   Сделка сохранена не полностью — можно нажать «Повторить ошибочные», бот дозаполнит её.")
         with S.lock:
             S.failed_n += 1
+        if isinstance(last_err, BrowserClosed):
+            S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
+            break
         errors_in_row += 1
         if errors_in_row >= MAX_ERRORS_IN_ROW:
             S.add_log(f"❌ {MAX_ERRORS_IN_ROW} ошибки подряд — останавливаюсь. Посмотрите скриншоты в папке logs.")
@@ -298,8 +331,11 @@ def api_parse():
 
 @app.post("/api/login")
 def api_login():
-    if S.running:
-        return jsonify(error="Уже идёт работа"), 409
+    """Открыть окно amoCRM. Если оно уже открыто или идёт вход — старое закрывается, открывается новое."""
+    if S.running and S.phase != "login":
+        return jsonify(error="Идёт создание сделок — дождитесь окончания или нажмите «Стоп»"), 409
+    if S.phase == "login":
+        S.relogin = True  # прервать текущее ожидание входа
     S.running = True
     jobs.put(("login", {}))
     return jsonify(ok=True)
@@ -353,7 +389,7 @@ def api_status():
     _last_seen = time.time()
     with S.lock:
         return jsonify(log=S.log[-200:], rows=S.rows, running=S.running, waiting=S.waiting,
-                       loggedIn=S.logged_in, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
+                       loggedIn=S.logged_in, phase=S.phase, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
                        pipelines=S.pipelines, total=S.total, doneN=S.done_n, failedN=S.failed_n)
 
 

@@ -37,6 +37,20 @@ SEL = {
 
 
 
+class BrowserClosed(RuntimeError):
+    """Пользователь закрыл окно браузера amoCRM."""
+    def __init__(self):
+        super().__init__("Окно amoCRM закрыто")
+
+
+def is_closed_error(e: BaseException) -> bool:
+    """Ошибка Playwright из-за закрытого окна/браузера (а не из-за самой amoCRM)."""
+    if isinstance(e, BrowserClosed):
+        return True
+    m = str(e)
+    return any(s in m for s in ("has been closed", "Target closed", "Browser closed", "Connection closed"))
+
+
 class AmoBot:
     def __init__(self, base_url: str, step: bool = False, slow_mo: int = 150, timeout: int = 15000):
         self.base_url = base_url.rstrip("/")
@@ -49,6 +63,7 @@ class AmoBot:
         self._pw = None
         self.ctx: BrowserContext | None = None
         self.page: Page | None = None
+        self._ctx_closed = False
 
     # ---------- запуск / вход ----------
     def start(self):
@@ -72,28 +87,50 @@ class AmoBot:
         else:
             raise RuntimeError("Не удалось открыть браузер (нужен Microsoft Edge или Google Chrome). "
                                + " | ".join(errors))
+        self.ctx.on("close", lambda *_: setattr(self, "_ctx_closed", True))
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
         self.page.set_default_timeout(self.timeout)
 
-    def stop(self):
-        try:
-            if self.ctx:
-                self.ctx.close()
-        finally:
-            if self._pw:
-                self._pw.stop()
+    @property
+    def closed(self) -> bool:
+        return self._ctx_closed or self.page is None or self.page.is_closed()
 
-    def ensure_logged_in(self, wait_minutes: int = 5):
+    def stop(self):
+        """Закрывает браузер amoCRM (если пользователь его ещё не закрыл)."""
+        for fn in (lambda: self.ctx and self.ctx.close(), lambda: self._pw and self._pw.stop()):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 — уже закрыт
+                pass
+        self.ctx = self._pw = self.page = None
+
+    def wait(self, ms: int):
+        """Пауза, во время которой Playwright замечает закрытие окна (тогда — BrowserClosed)."""
+        try:
+            self.page.wait_for_timeout(ms)
+        except Exception as e:  # noqa: BLE001
+            if is_closed_error(e) or self.closed:
+                raise BrowserClosed() from None
+            raise
+
+    def ensure_logged_in(self, wait_minutes: int = 5, cancelled=lambda: False):
         p = self.page
-        p.goto(self.base_url + "/dashboard/", wait_until="domcontentloaded")
-        if self._nav_deals_visible(5000):
-            return
-        self.log_cb(f"Войдите в amoCRM в открывшемся окне браузера (жду до {wait_minutes} мин)...")
-        deadline = time.time() + wait_minutes * 60
-        while time.time() < deadline:
-            if self._nav_deals_visible(2000):
-                self.log_cb("Вход выполнен.")
+        try:
+            p.goto(self.base_url + "/dashboard/", wait_until="domcontentloaded")
+            if self._nav_deals_visible(5000):
                 return
+            self.log_cb(f"Войдите в amoCRM в открывшемся окне браузера (жду до {wait_minutes} мин)...")
+            deadline = time.time() + wait_minutes * 60
+            while time.time() < deadline:
+                if cancelled():
+                    raise RuntimeError("Вход отменён — открываю окно amoCRM заново")
+                if self._nav_deals_visible(1000):
+                    self.log_cb("Вход выполнен.")
+                    return
+        except Exception as e:  # noqa: BLE001
+            if is_closed_error(e) or self.closed:
+                raise BrowserClosed() from None
+            raise
         raise RuntimeError("Не дождался входа в amoCRM")
 
     def _nav_deals_visible(self, timeout: int) -> bool:
