@@ -448,11 +448,17 @@ def api_parse():
     finally:
         tmp.unlink(missing_ok=True)
     progress = load_progress()
+    migrated = False
     out = []
     for i, d in enumerate(deals):
         kr = next((c for c in d.contacts if c.role in ("КР", "ВС")), None)
         rk = next((c for c in d.contacts if c.role == "РК"), None)
         done = progress.get(d.name)
+        if done is None and d.legacy_name in progress:
+            # создана до v1.0.15 со старым названием («6 Ж Школа») — запоминаем и под новым («6ж Школа»),
+            # чтобы не создать дубль и чтобы «Списки детей в созданные» её нашли
+            done = progress[d.name] = dict(progress[d.legacy_name])
+            migrated = True
         out.append({
             "id": f"r{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass,
             "kr": {"name": kr.name if kr else "", "phone": kr.phone_field if kr else ""},
@@ -462,6 +468,8 @@ def api_parse():
             "note": bool(done.get("note")) if done else False,
             "doneStatus": done.get("status") if done else None,
         })
+    if migrated:
+        save_progress(progress)
     with S.lock:
         S.rows = {}
         if not S.running:

@@ -274,9 +274,15 @@ const KIND = {
   kindergarten: {lead: "ВС", place: "Детский сад", units: "Групп"},
 };
 const lead = () => KIND[kind].lead;
+// класс: «6 Ж» → «6ж», «3Б» → «3б» (как norm_class в excel_reader.py); другие записи не трогаем
+function normClass(klass){
+  const m = /^(\d{1,2})\s*([A-Za-zА-Яа-яЁё]{1,2})$/.exec(klass);
+  return m ? m[1] + m[2].toLowerCase() : klass;
+}
 function autoName(klass, place, k, pre = ""){
   klass = String(klass ?? "").trim();
-  if(k === "kindergarten") klass = "гр." + klass.replace(/^гр(уппа)?\.?\s*/i, "");
+  if(k === "kindergarten") klass = "гр." + normClass(klass.replace(/^гр(уппа)?\.?\s*/i, ""));
+  else klass = normClass(klass);
   return `${pre.trim()} ${klass} ${place}`.trim().replace(/\s+/g, " ");
 }
 // ФИО с заглавных букв: «диля халимовна» → «Диля Халимовна», «анна-мария» → «Анна-Мария»

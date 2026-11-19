@@ -32,11 +32,26 @@ LEAD_ROLE = {SCHOOL: "КР", KINDERGARTEN: "ВС"}  # первый контак�
 PLACE_RE = re.compile(r"^\s*(школа|дс|д/с|детский\s+сад)\s*[:№]?\s*(.*)$", re.I)
 
 
-def deal_name(klass: str, place: str, kind: str) -> str:
-    """Название сделки: «1а ВХТЛ-сп4» для школы, «гр.11 1368-до4» для детского сада."""
+# класс «6 Ж», «6Ж», «11 а» — цифры и буква (буквы), между ними может быть пробел
+CLASS_RE = re.compile(r"^(\d{1,2})\s*([A-Za-zА-Яа-яЁё]{1,2})$")
+
+
+def norm_class(klass: str) -> str:
+    """«6 ж» → «6ж», «3Б» → «3б». Другие записи («11 мат», «Солнышко») не трогает."""
+    klass = klass.strip()
+    m = CLASS_RE.match(klass)
+    return (m.group(1) + m.group(2).lower()) if m else klass
+
+
+def deal_name(klass: str, place: str, kind: str, normalize: bool = True) -> str:
+    """Название сделки: «1а ВХТЛ-сп4» для школы, «гр.11 1368-до4» для детского сада.
+    normalize=False — как до v1.0.15 (класс как в файле): по нему ищутся созданные раньше сделки."""
     klass = klass.strip()
     if kind == KINDERGARTEN:
-        klass = "гр." + re.sub(r"^гр(уппа)?\.?\s*", "", klass, flags=re.I)
+        klass = re.sub(r"^гр(уппа)?\.?\s*", "", klass, flags=re.I)
+        klass = "гр." + (norm_class(klass) if normalize else klass)
+    elif normalize:
+        klass = norm_class(klass)
     return f"{klass} {place}".strip()
 
 
@@ -88,6 +103,11 @@ class Deal:
     @property
     def name(self) -> str:
         return deal_name(self.klass, self.school, self.kind)
+
+    @property
+    def legacy_name(self) -> str:
+        """Название, как его строили до v1.0.15 («6 Ж Школа»), — для поиска уже созданных сделок."""
+        return deal_name(self.klass, self.school, self.kind, normalize=False)
 
     @property
     def key(self) -> str:
