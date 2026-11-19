@@ -242,17 +242,17 @@ const store = {
   set(k, v){ try{ localStorage.setItem(k, v); }catch(e){} },
 };
 
-let deals = [], original = [], school = "", fileSchool = "", kind = "school", fileKind = "school";
+let deals = [], original = [], school = "", prefix = "", fileSchool = "", kind = "school", fileKind = "school";
 // школа: сделка «1а ВХТЛ-сп4», первый контакт КР; детский сад: «гр.11 1368-до4», первый контакт ВС
 const KIND = {
   school:       {lead: "КР", place: "Школа",       units: "Классов"},
   kindergarten: {lead: "ВС", place: "Детский сад", units: "Групп"},
 };
 const lead = () => KIND[kind].lead;
-function autoName(klass, place, k){
+function autoName(klass, place, k, pre = ""){
   klass = String(klass ?? "").trim();
   if(k === "kindergarten") klass = "гр." + klass.replace(/^гр(уппа)?\.?\s*/i, "");
-  return `${klass} ${place}`.trim();
+  return `${pre.trim()} ${klass} ${place}`.trim().replace(/\s+/g, " ");
 }
 // ФИО с заглавных букв: «диля халимовна» → «Диля Халимовна», «анна-мария» → «Анна-Мария»
 const fixNameCase = s => s.split(/(\s+)/).map(w => w.split("-").map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join("-")).join("");
@@ -319,7 +319,7 @@ async function upload(f){
   if(!r.ok){ alert(j.error); return; }
   j.deals.forEach(d => d.sel = !isDone(d) && !d.refused && !d.red);
   original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
-  fileSchool = school; kind = fileKind = j.kind === "kindergarten" ? "kindergarten" : "school";
+  prefix = ""; fileSchool = school; kind = fileKind = j.kind === "kindergarten" ? "kindergarten" : "school";
   document.body.classList.add("loaded");
   $("#drop").innerHTML = '<span class="big-t">Другой файл…</span>';
   const refused = deals.filter(d => d.refused && !d.red).length, red = deals.filter(d => d.red).length, done = deals.filter(isDone).length;
@@ -330,12 +330,14 @@ async function upload(f){
         <button type="button" data-kind="school">Школа</button><button type="button" data-kind="kindergarten">Детский сад</button>
       </span></span>
     <label><span id="placeLbl"></span> <input id="school" value="${esc(school)}" title="Поменяет название во всех сделках"></label>
+    <label title="Добавляется в начало названия всех сделок и «Названия компании», например НГ → «НГ 3в Под_18-сп1»">Префикс <input id="prefix" value="" placeholder="например, НГ" size="10"></label>
     <span><span id="unitsLbl"></span>: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
     ${red ? `<span>Красные в файле: <b>${red}</b> (не отмечены)</span>` : ""}
     ${refused ? `<span>Похоже на отказ: <b>${refused}</b> (не отмечены)</span>` : ""}`;
-  $("#school").onchange = e => rename(e.target.value.trim(), kind);
-  document.querySelectorAll(".seg [data-kind]").forEach(b => b.onclick = () => rename(school, b.dataset.kind));
+  $("#school").onchange = e => rename(e.target.value.trim(), kind, prefix);
+  $("#prefix").onchange = e => rename(school, kind, e.target.value.trim());
+  document.querySelectorAll(".seg [data-kind]").forEach(b => b.onclick = () => rename(school, b.dataset.kind, prefix));
   applyKindUI();
   $("#warnings").innerHTML = j.warnings.length ? `<div class="warn">${j.warnings.map(esc).join("<br>")}</div>` : "";
   $("#actionCard").classList.remove("hidden"); $("#tableCard").classList.remove("hidden");
@@ -343,12 +345,12 @@ async function upload(f){
 }
 
 // новое название учреждения или тип: переименовать сделки, у которых название не правили вручную
-function rename(newSchool, newKind){
-  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); applyKindUI(); return; }
+function rename(newSchool, newKind, newPrefix){
+  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); applyKindUI(); if($("#prefix")) $("#prefix").value = prefix; return; }
   for(const d of deals){
-    if(d.name === autoName(d.klass, school, kind)) d.name = autoName(d.klass, newSchool, newKind);
+    if(d.name === autoName(d.klass, school, kind, prefix)) d.name = autoName(d.klass, newSchool, newKind, newPrefix);
   }
-  school = newSchool; kind = newKind;
+  school = newSchool; kind = newKind; prefix = newPrefix;
   applyKindUI(); renderRows();
 }
 function applyKindUI(){
@@ -442,7 +444,8 @@ $("#all").onchange = e => {
 $("#btnRestore").onclick = () => {
   if(S.running) return;
   if(!confirm("Вернуть все строки и значения как в файле? Ваши правки пропадут.")) return;
-  deals = clone(original); kind = fileKind; school = fileSchool;
+  deals = clone(original); kind = fileKind; school = fileSchool; prefix = "";
+  if($("#prefix")) $("#prefix").value = "";
   applyKindUI(); renderRows();
 };
 $("#btnClear").onclick = () => {
