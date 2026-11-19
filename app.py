@@ -29,6 +29,7 @@ if sys.stdout is None or sys.stderr is None:
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
 from excel_reader import Contact, Deal, fix_name_case, read_deals  # noqa: E402
+from kids_lists import class_key, count_kids  # noqa: E402
 
 CONFIG = paths.load_config()
 if os.environ.get("AMO_URL"):  # для проверок на макете amoCRM
@@ -157,7 +158,8 @@ def worker():
                     close_bot()
                 ensure_bot()
             elif kind == "run":
-                run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""))
+                run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
+                          payload.get("max_chat", ""), payload.get("notes_only", False))
         except Exception as e:  # noqa: BLE001
             if is_closed_error(e) or (bot is not None and bot.closed):
                 S.add_log("Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
@@ -175,13 +177,73 @@ def worker():
 MAX_ERRORS_IN_ROW = 3  # столько ошибок подряд = что-то сломалось целиком, останавливаемся
 
 
-def run_deals(bot, items: list[dict], step: bool, pipeline: str):
+def read_kids_lists(bot, chat: str, items: list[dict]) -> dict[str, str] | None:
+    """Списки детей из беседы MAX по классам сделок; None — прочитать не удалось."""
+    from amo_bot import is_closed_error
+    from max_chat import MaxChat
+    need = {class_key(it.get("klass", "")) for it in items} - {""}
+    if not need:
+        S.add_log("Списки детей: у сделок не указан класс — MAX пропускаю.")
+        return None
+    S.add_log(f"Списки детей: читаю чат MAX «{chat}» (классов: {len(need)})…")
+    mx = MaxChat(bot.ctx, log=S.add_log, should_stop=lambda: S.stop_flag)
+    try:
+        lists = mx.read_lists(chat, need)
+    except Exception as e:  # noqa: BLE001
+        if is_closed_error(e) or "Остановлено пользователем" in str(e):
+            raise
+        S.add_log(f"   ⚠ MAX: {str(e).splitlines()[0][:300]}")
+        return None
+    finally:
+        try:
+            bot.page.bring_to_front()
+        except Exception:  # noqa: BLE001
+            pass
+    missing = sorted(need - set(lists))
+    S.add_log(f"   Найдены списки: {len(need) - len(missing)} из {len(need)}"
+              + (f"; нет в чате: {', '.join(missing)}" if missing else ""))
+    return lists
+
+
+def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, name: str) -> None:
+    """Примечание со списком детей в открытую сделку; результат — в строку таблицы и progress."""
+    from amo_bot import is_closed_error
+    if lists is None:
+        return
+    body = lists.get(class_key(it.get("klass", "")))
+    if not body:
+        S.set_row(it["id"], note="none")
+        S.add_log("   Списка детей для этого класса в чате нет")
+        return
+    try:
+        bot.add_note(body)
+    except Exception as e:  # noqa: BLE001
+        if "Остановлено пользователем" in str(e) or is_closed_error(e) or bot.closed:
+            raise
+        shot = bot.screenshot(f"note-{name}")
+        S.set_row(it["id"], note="error")
+        S.add_log(f"   ⚠ примечание не добавлено: {str(e).splitlines()[0][:200]} (скриншот: {shot.name})")
+        return
+    progress.setdefault(name, {})["note"] = True
+    save_progress(progress)
+    S.set_row(it["id"], note="ok")
+    S.add_log(f"   📝 примечание: список детей ({count_kids(body)})")
+
+
+def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False):
     from amo_bot import BrowserClosed, is_closed_error
     progress = load_progress()
     S.stop_flag = False
     S.running = True
     with S.lock:
         S.total, S.done_n, S.failed_n = len(items), 0, 0
+    lists = None
+    if max_chat:
+        todo = [it for it in items if not progress.get(it["name"].strip(), {}).get("note")]
+        if notes_only:
+            todo = [it for it in todo if progress.get(it["name"].strip(), {}).get("status") == "ok"]
+        if todo:
+            lists = read_kids_lists(bot, max_chat, todo)
     errors_in_row = 0
     for n, it in enumerate(items, 1):
         if S.stop_flag:
@@ -192,9 +254,28 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
         contacts = [Contact(role=c["role"], name=fix_name_case(c["name"].strip()), phone=c["phone"].strip())
                     for c in it["contacts"] if c["name"].strip() or c["phone"].strip()]
         prev = progress.get(name, {})
+        if notes_only and prev.get("status") != "ok":
+            S.set_row(rid, status="error", error="Сделка ещё не создана — сначала «Создать»")
+            with S.lock:
+                S.failed_n += 1
+            continue
         if prev.get("status") == "ok":
-            S.set_row(rid, status="skip", url=prev.get("url"))
-            S.add_log(f"Пропуск «{name}» — уже создана")
+            S.set_row(rid, status="skip", url=prev.get("url"), note="ok" if prev.get("note") else None)
+            if lists is not None and not prev.get("note") and prev.get("url"):
+                S.add_log(f"[{n}/{len(items)}] «{name}» — уже создана, добавляю список детей")
+                try:
+                    bot.open_deal(prev["url"])
+                    add_kids_note(bot, it, lists, progress, name)
+                except Exception as e:  # noqa: BLE001
+                    if is_closed_error(e) or bot.closed:
+                        S.logged_in = False
+                        S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
+                        break
+                    if "Остановлено пользователем" not in str(e):
+                        S.set_row(rid, note="error")
+                        S.add_log(f"   ⚠ {str(e).splitlines()[0][:300]}")
+            else:
+                S.add_log(f"Пропуск «{name}» — уже создана" + (" (список детей уже добавлен)" if prev.get("note") else ""))
             with S.lock:
                 S.done_n += 1
             continue
@@ -247,6 +328,14 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
             errors_in_row = 0
             with S.lock:
                 S.done_n += 1
+            if not S.stop_flag:
+                try:  # сделка уже создана: без примечания её можно дополнить позже кнопкой «Списки детей»
+                    add_kids_note(bot, it, lists, progress, name)
+                except Exception as e:  # noqa: BLE001
+                    if is_closed_error(e) or bot.closed:
+                        S.logged_in = False
+                        S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
+                        break
             continue
         err = "Остановлено" if S.stop_flag else str(last_err).splitlines()[0][:300]
         S.set_row(rid, status="partial" if state["url"] else "error", error=err, url=state["url"])
@@ -266,7 +355,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str):
         for it in items:
             if S.rows.get(it["id"], {}).get("status") == "queued":
                 S.rows[it["id"]]["status"] = None
-    S.add_log(f"Готово: создано {S.done_n}, с ошибками {S.failed_n}.")
+    S.add_log(f"Готово: {'обработано' if notes_only else 'создано'} {S.done_n}, с ошибками {S.failed_n}.")
 
 
 def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, state: dict):
@@ -327,6 +416,7 @@ def api_parse():
             "rk": {"name": rk.name if rk else "", "phone": rk.phone_field if rk else ""},
             "info": d.info, "refused": d.refused, "red": d.red,
             "done": done.get("url") if done else None,
+            "note": bool(done.get("note")) if done else False,
             "doneStatus": done.get("status") if done else None,
         })
     with S.lock:
@@ -361,11 +451,16 @@ def api_run():
     pipeline = (data.get("pipeline") or "").strip()
     if not pipeline:
         return jsonify(error="Выберите воронку"), 400
+    max_chat = (data.get("maxChat") or "").strip()
+    notes_only = bool(data.get("notesOnly"))
+    if notes_only and not max_chat:
+        return jsonify(error="Впишите название чата MAX со списками детей"), 400
     for it in items:
-        S.set_row(it["id"], status="queued", error=None)
+        S.set_row(it["id"], status="queued", error=None, note=None)
     S.running = True
     S.stop_flag = False
-    jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline}))
+    jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline,
+                      "max_chat": max_chat, "notes_only": notes_only}))
     return jsonify(ok=True)
 
 

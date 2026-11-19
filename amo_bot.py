@@ -33,6 +33,11 @@ SEL = {
     "company_placeholder": "Название компании",
     "add_contact_text": "Добавить контакт",
     "save_text": "Сохранить",
+    # примечание внизу ленты сделки: «Примечание: введите текст» → «Добавить»
+    "note_composer": [".feed-compose", ".notes-wrapper .feed-compose__inner", '[class*="feed-compose"]'],
+    "note_switcher": '.feed-compose-switcher, [class*="switcher"]',
+    "note_text": "Примечание",
+    "note_add_text": "Добавить",
 }
 
 
@@ -480,6 +485,66 @@ class AmoBot:
             self._pause(f"{deal.name}: контактов нет, дальше «Сохранить»")
             self.save()
         return self.page.url
+
+    # ---------- примечание ----------
+    def _note_composer(self) -> Locator:
+        """Поле ввода внизу ленты сделки («Примечание: введите текст»)."""
+        p = self.page
+        for sel in SEL["note_composer"]:
+            loc = p.locator(sel).locator("visible=true")
+            if loc.count():
+                return loc.last
+        raise RuntimeError("Не нашёл поле «Примечание» внизу карточки сделки")
+
+    def _note_mode(self, comp: Locator):
+        """Включает режим «Примечание», если в поле выбран «Чат» или «Задача»."""
+        try:
+            head = comp.inner_text(timeout=1000)
+        except Exception:  # noqa: BLE001
+            head = ""
+        if head.strip().lower().startswith(SEL["note_text"].lower()):
+            return
+        switcher = comp.locator(SEL["note_switcher"]).locator("visible=true").first
+        if switcher.count():
+            switcher.click()
+            self._sleep(400)
+            opt = self.page.get_by_text(SEL["note_text"], exact=True).locator("visible=true").last
+            if opt.count():
+                opt.click()
+                self._sleep(400)
+
+    def add_note(self, text: str):
+        """Пишет примечание в открытую сделку и нажимает «Добавить». Строки — через Shift+Enter."""
+        p = self.page
+        self.check_stop()
+        self._mouse_away()
+        comp = self._note_composer()
+        comp.scroll_into_view_if_needed(timeout=3000)
+        self._note_mode(comp)
+        area = comp.locator('[contenteditable="true"], textarea').locator("visible=true").first
+        (area if area.count() else comp).click()
+        self._sleep(300)
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if i:
+                p.keyboard.press("Shift+Enter")
+            p.keyboard.insert_text(line)
+        self._pause(f"Примечание вписано ({len(lines) - 1} строк). «Продолжить» — нажать «Добавить»")
+        self.check_stop()
+        btn = comp.get_by_role("button", name=SEL["note_add_text"], exact=True).or_(
+            comp.get_by_text(SEL["note_add_text"], exact=True)).locator("visible=true").first
+        if not btn.count():
+            btn = p.get_by_text(SEL["note_add_text"], exact=True).locator("visible=true").last
+        btn.click()
+        # примечание добавлено — поле ввода очищается
+        probe = lines[-1].strip()
+        box = area if area.count() else comp
+        end = time.time() + 15
+        while probe in box.inner_text(timeout=2000):
+            if time.time() > end:
+                raise RuntimeError("Примечание не добавилось (текст остался в поле)")
+            self._sleep(300)
+        p.wait_for_timeout(800)
 
     # ---------- диагностика ----------
     def probe(self) -> Path:
