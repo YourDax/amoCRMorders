@@ -68,6 +68,18 @@ class FindLists(unittest.TestCase):
         lists = merge_snapshots(["7а\nИванов Иван\nПетрова Мария\n10:00\nПривет всем, как дела?"])
         self.assertEqual(lists["7а"], "7а\nИванов Иван\nПетрова Мария")
 
+    def test_short_surname_not_class(self):
+        # «10.Ли» и «1.Ю» похожи на заголовки классов «10Л» / «1Ю», но это дети по порядку
+        kids = ["Костин", "Мусаев", "Бахтина", "Долганин", "Хохлов", "Саранчин", "Гетманский",
+                "Чичева", "Брндаренко", "Ли", "Брагин", "Лузгин", "Асатрян", "Самойленко"]
+        text = "1б\n" + "\n".join(f"{n}.{k}" for n, k in enumerate(kids, 1)) + "\n12:58"
+        found = find_lists(text)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(count_kids(found[0][1]), 14)
+        self.assertEqual(count_kids(find_lists("2а\n1.Ю\n2.Ким")[0][1]), 2)
+        # а настоящий следующий класс после списка по-прежнему начинает новый список
+        self.assertEqual([k for k, _ in find_lists("1б\n1.Ли\n2.Ким\n2а\n1.Петров")], ["1б", "2а"])
+
     def test_header_without_list_ignored(self):
         self.assertEqual(find_lists("Завтра снимаем 6Б\n6Б\nВо сколько?"), [])
 

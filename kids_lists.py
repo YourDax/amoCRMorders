@@ -22,6 +22,7 @@ _WORDS_RE = re.compile(r"\b(класс\w*|кл|группа|гр|group)\b\.?", r
 _KEY_RE = re.compile(r"^\d{1,2}[а-я]{0,2}$")
 _TIME_RE = re.compile(r"^\s*(\d{1,2}:\d{2})(\s*(изменено|ред\.?))?\s*$", re.I)
 _NUMBERED_RE = re.compile(r"^\s*\d{1,3}\s*[.)\-–:]?\s*\S")
+_ITEM_NO_RE = re.compile(r"^\s*(\d{1,3})\s*[.)\-–:]\s*\S")  # «10.Ли», «3) Иванов»
 _NAME_RE = re.compile(r"^[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\-'’]*(\s+[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\-'’.]*){0,3}$")
 
 
@@ -73,7 +74,10 @@ def find_lists(text: str) -> list[tuple[str, str]]:
             if not s:  # пустые строки внутри сообщения допустимы
                 j += 1
                 continue
-            if _is_class_line(s) or not _is_entry(s, numbered):
+            num = _ITEM_NO_RE.match(s)
+            # «10.Ли» похоже на заголовок класса «10Л», но это следующий по номеру ребёнок
+            next_item = numbered is not False and num and int(num.group(1)) == len(entries) + 1
+            if not next_item and (_is_class_line(s) or not _is_entry(s, numbered)):
                 break
             if numbered is None:
                 numbered = bool(_NUMBERED_RE.match(s))
