@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import queue
 import sys
@@ -28,6 +27,7 @@ if sys.stdout is None or sys.stderr is None:
 
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
+import history  # noqa: E402
 from excel_reader import Contact, Deal, fix_name_case, read_deals  # noqa: E402
 from kids_lists import class_key, count_kids  # noqa: E402
 
@@ -58,7 +58,7 @@ class State:
         self.waiting: str | None = None    # текст паузы в пошаговом режиме
         self.stop_flag = False
         self.continue_evt = threading.Event()
-        self.total = self.done_n = self.failed_n = 0
+        self.total = self.done_n = self.failed_n = self.notes_n = 0
         self.pipelines: list[str] = list(CONFIG.get("pipelines", []))
 
     def add_log(self, msg: str):
@@ -83,14 +83,12 @@ jobs: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 
 
 def load_progress() -> dict:
-    try:
-        return json.loads(PROGRESS.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
+    data = paths.read_json(PROGRESS, {})
+    return data if isinstance(data, dict) else {}
 
 
 def save_progress(p: dict):
-    PROGRESS.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
+    paths.write_json(PROGRESS, p)
 
 
 # ---------------- фоновый поток с браузером ----------------
@@ -158,14 +156,23 @@ def worker():
                     close_bot()
                 ensure_bot()
             elif kind == "run":
-                run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
-                          payload.get("max_chat", ""), payload.get("notes_only", False))
+                try:
+                    b = ensure_bot()  # не вошли в amoCRM — в историю нечего писать
+                    try:
+                        run_deals(b, payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
+                                  payload.get("max_chat", ""), payload.get("notes_only", False))
+                    finally:
+                        log_history(payload)
+                finally:
+                    clear_queued(payload["deals"])
         except Exception as e:  # noqa: BLE001
             if is_closed_error(e) or (bot is not None and bot.closed):
                 S.add_log("Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
                 close_bot()
             elif S.relogin:
                 S.add_log(str(e).splitlines()[0])
+            elif "Остановлено пользователем" in str(e):
+                S.add_log("Остановлено.")
             else:
                 S.add_log(f"❌ {str(e).splitlines()[0][:300]}")
                 S.logged_in = False
@@ -227,6 +234,8 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     progress.setdefault(name, {})["note"] = True
     save_progress(progress)
     S.set_row(it["id"], note="ok")
+    with S.lock:
+        S.notes_n += 1
     S.add_log(f"   📝 примечание: список детей ({count_kids(body)})")
 
 
@@ -236,7 +245,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
     S.stop_flag = False
     S.running = True
     with S.lock:
-        S.total, S.done_n, S.failed_n = len(items), 0, 0
+        S.total, S.done_n, S.failed_n, S.notes_n = len(items), 0, 0, 0
     lists = None
     if max_chat:
         todo = [it for it in items if not progress.get(it["name"].strip(), {}).get("note")]
@@ -351,11 +360,39 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
         if errors_in_row >= MAX_ERRORS_IN_ROW:
             S.add_log(f"❌ {MAX_ERRORS_IN_ROW} ошибки подряд — останавливаюсь. Посмотрите скриншоты в папке logs.")
             break
-    with S.lock:  # строки, до которых не дошли, больше не «в очереди»
+    clear_queued(items)
+    S.add_log(f"Готово: {'обработано' if notes_only else 'создано'} {S.done_n}, с ошибками {S.failed_n}.")
+
+
+def clear_queued(items: list[dict]):
+    """Строки, до которых не дошли (стоп, ошибка MAX, закрыли окно), больше не «в очереди»."""
+    with S.lock:
         for it in items:
             if S.rows.get(it["id"], {}).get("status") == "queued":
                 S.rows[it["id"]]["status"] = None
-    S.add_log(f"Готово: {'обработано' if notes_only else 'создано'} {S.done_n}, с ошибками {S.failed_n}.")
+
+
+def log_history(payload: dict):
+    """Итог запуска — в журнал действий таблицы в истории."""
+    hid = payload.get("history_id")
+    if not hid:
+        return
+    with S.lock:
+        done, failed, notes, total = S.done_n, S.failed_n, S.notes_n, S.total
+    if payload.get("notes_only"):
+        text = f"Списки детей в созданные: добавлено {notes} из {total}"
+    else:
+        text = f"Создание сделок ({payload.get('pipeline', '')}): готово {done} из {total}"
+        if payload.get("max_chat"):
+            text += f", списков детей {notes}"
+    if failed:
+        text += f", ошибок {failed}"
+    if S.stop_flag:
+        text += " — остановлено"
+    try:
+        history.add_action(hid, text)
+    except OSError:
+        pass
 
 
 def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, state: dict):
@@ -430,7 +467,17 @@ def api_parse():
         if not S.running:
             S.total = S.done_n = S.failed_n = 0
     school = deals[0].school if deals else ""
-    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename, kind=kind or "school")
+    kind = kind or "school"
+    for d in out:
+        d["sel"] = not (d["done"] and d["doneStatus"] != "partial") and not d["refused"] and not d["red"]
+    hid = None
+    try:
+        hid = history.create({"file": f.filename, "kind": kind, "fileKind": kind, "school": school,
+                              "fileSchool": school, "prefix": "", "deals": out, "original": out,
+                              "warnings": warnings}, f"Загружен файл, строк: {len(out)}")
+    except OSError:
+        pass
+    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename, kind=kind, historyId=hid)
 
 
 @app.post("/api/login")
@@ -461,12 +508,16 @@ def api_run():
     notes_only = bool(data.get("notesOnly"))
     if notes_only and not max_chat:
         return jsonify(error="Впишите название чата MAX со списками детей"), 400
+    with S.lock:  # два быстрых нажатия не должны запустить работу дважды
+        if S.running:
+            return jsonify(error="Уже идёт работа"), 409
+        S.running = True
     for it in items:
         S.set_row(it["id"], status="queued", error=None, note=None)
-    S.running = True
     S.stop_flag = False
     jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline,
-                      "max_chat": max_chat, "notes_only": notes_only}))
+                      "max_chat": max_chat, "notes_only": notes_only,
+                      "history_id": data.get("historyId") or ""}))
     return jsonify(ok=True)
 
 
@@ -487,6 +538,35 @@ def api_stop():
     return jsonify(ok=True)
 
 
+@app.get("/api/history")
+def api_history():
+    return jsonify(items=history.listing(load_progress()))
+
+
+@app.get("/api/history/<hid>")
+def api_history_open(hid):
+    """Таблица из истории — продолжить работу. Отметки «создана» берутся свежие из progress.json."""
+    if S.running:
+        return jsonify(error="Дождитесь окончания или нажмите «Стоп»"), 409
+    e = history.get(hid)
+    if e is None:
+        return jsonify(error="Запись истории не найдена"), 404
+    progress = load_progress()
+    history.refresh_deals(e.get("deals"), progress)
+    history.refresh_deals(e.get("original"), progress)
+    with S.lock:
+        S.rows = {}
+        S.total = S.done_n = S.failed_n = S.notes_n = 0
+    return jsonify(entry=e)
+
+
+@app.post("/api/history/<hid>")
+def api_history_save(hid):
+    if not history.update(hid, request.get_json(force=True) or {}):
+        return jsonify(error="Запись истории не найдена"), 404
+    return jsonify(ok=True)
+
+
 @app.post("/api/forget")
 def api_forget():
     name = request.get_json(force=True).get("name", "")
@@ -503,7 +583,8 @@ def api_status():
     with S.lock:
         return jsonify(log=S.log[-200:], rows=S.rows, running=S.running, waiting=S.waiting,
                        loggedIn=S.logged_in, phase=S.phase, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
-                       pipelines=S.pipelines, total=S.total, doneN=S.done_n, failedN=S.failed_n)
+                       pipelines=S.pipelines, total=S.total, doneN=S.done_n, failedN=S.failed_n,
+                       notesN=S.notes_n)
 
 
 def open_ui(url: str) -> bool:

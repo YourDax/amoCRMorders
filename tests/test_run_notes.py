@@ -107,6 +107,27 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(bot2.notes, [("https://x/leads/detail/1", LISTS["5б"])])
         self.assertEqual(app.S.rows["r2"]["status"], "error")  # 6б ещё не создана
 
+    def test_stop_while_reading_max_unqueues_rows(self):
+        def stopped(*_):
+            raise RuntimeError("Остановлено пользователем")
+        app.read_kids_lists = stopped
+        items = [item(1, "5б"), item(2, "6б")]
+        for it in items:
+            app.S.set_row(it["id"], status="queued")
+        with self.assertRaises(RuntimeError):
+            app.run_deals(FakeBot(), items, False, "P", "Щ_10 - Зима 2026")
+        app.clear_queued(items)  # так делает worker в finally
+        self.assertIsNone(app.S.rows["r1"]["status"])
+
+    def test_history_action_logged(self):
+        import history
+        history.FILE = Path(self.tmp.name) / "history.json"
+        hid = history.create({"file": "a.xlsx", "deals": []}, "Загружен файл")
+        app.run_deals(FakeBot(), [item(1, "5б"), item(2, "6б")], False, "P", "Щ_10 - Зима 2026")
+        app.log_history({"history_id": hid, "pipeline": "P", "max_chat": "Щ_10"})
+        self.assertEqual(history.get(hid)["actions"][-1]["text"],
+                         "Создание сделок (P): готово 2 из 2, списков детей 2")
+
 
 if __name__ == "__main__":
     unittest.main()

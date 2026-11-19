@@ -168,6 +168,23 @@ button.x:hover:not(:disabled){background:var(--err-weak);color:var(--err)}
 details summary{cursor:pointer;color:var(--muted);font-size:12px;padding:8px 14px;user-select:none}
 details summary:hover{color:var(--text)}
 #log{font:12px/1.5 "Cascadia Mono",Consolas,ui-monospace,monospace;background:var(--input);border-top:1px solid var(--line);padding:10px 14px;height:240px;overflow:auto;white-space:pre-wrap;margin:0}
+/* история таблиц */
+.hist{position:relative}
+#histBtn{height:26px;padding:0 9px;font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+#histBtn:hover:not(:disabled){color:var(--text)}
+#histBtn svg{width:10px;height:10px}
+#histPop{position:absolute;top:32px;left:0;width:440px;max-width:calc(100vw - 32px);max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);box-shadow:0 6px 24px rgba(0,0,0,.18);z-index:20;padding:4px 0}
+.hitem{display:block;width:100%;height:auto;text-align:left;border:none;border-radius:0;padding:7px 12px;background:none}
+.hitem+.hitem{border-top:1px solid var(--line)}
+.hitem:hover:not(:disabled){background:var(--hover)}
+.hitem.cur{box-shadow:inset 3px 0 0 var(--accent)}
+.hitem .h1{display:flex;gap:10px;align-items:baseline}
+.hitem .h1 b{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hitem .h2,.hitem .h3{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hitem .h3{color:var(--faint)}
+.hstate{font-size:12px;white-space:nowrap}
+.st-done{color:var(--ok)} .st-work{color:var(--warn)} .st-new,.st-empty{color:var(--faint)}
+.hempty{padding:12px;color:var(--muted);font-size:12px}
 @media (max-width:700px){ header{padding:0 16px} main{padding:12px 16px} .meta>*{padding:0 10px} select{min-width:0;max-width:100%} }
 </style>
 </head>
@@ -175,6 +192,10 @@ details summary:hover{color:var(--text)}
 <header>
   <h1>Сделки в amoCRM</h1>
   <button id="conn" class="status-conn" title="Открыть окно amoCRM и войти">amoCRM: войти</button>
+  <div class="hist">
+    <button id="histBtn" title="Прежние таблицы: продолжить работу" aria-haspopup="true" aria-expanded="false">История <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3.5l3 3 3-3"/></svg></button>
+    <div id="histPop" class="hidden" role="menu"></div>
+  </div>
   <div class="spacer"></div>
   <button id="theme" title="Сменить тему оформления"></button>
   <span id="ver"></span>
@@ -195,7 +216,7 @@ details summary:hover{color:var(--text)}
   <section class="panel panel-body hidden" id="actionCard">
     <div class="action">
       <label><span class="lbl">Воронка</span> <select id="pipeline"></select></label>
-      <label title="Точное название беседы в MAX, например «Щ_10 - Зима 2026». Из неё в примечание каждой сделки попадёт список детей её класса (самое свежее сообщение). Пусто — без списков"><span class="lbl">Чат MAX со списками</span> <input id="maxChat" placeholder="например, Щ_10 - Зима 2026" size="26"></label>
+      <label title="Необязательно. Точное название беседы в MAX, например «Щ_10 - Зима 2026». Из неё в примечание каждой сделки попадёт список детей её класса (самое свежее сообщение). Пусто — сделки создаются без списков. После перезапуска программы поле пустое"><span class="lbl">Чат MAX со списками</span> <input id="maxChat" placeholder="необязательно" size="26"></label>
       <label title="Перед каждым «Сохранить» бот остановится, чтобы вы проверили форму"><input type="checkbox" id="step"> Проверять перед сохранением</label>
       <div class="spacer"></div>
       <button class="danger hidden" id="btnStop">Стоп</button>
@@ -246,6 +267,7 @@ const store = {
 };
 
 let deals = [], original = [], school = "", prefix = "", fileSchool = "", kind = "school", fileKind = "school";
+let histId = null, curFile = "", curWarnings = [];  // запись «Истории», в которую сохраняется таблица
 // школа: сделка «1а ВХТЛ-сп4», первый контакт КР; детский сад: «гр.11 1368-до4», первый контакт ВС
 const KIND = {
   school:       {lead: "КР", place: "Школа",       units: "Классов"},
@@ -321,8 +343,19 @@ async function upload(f){
   fileInp.value = "";
   if(!r.ok){ alert(j.error); return; }
   j.deals.forEach(d => d.sel = !isDone(d) && !d.refused && !d.red);
-  original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
-  prefix = ""; fileSchool = school; kind = fileKind = j.kind === "kindergarten" ? "kindergarten" : "school";
+  const k = j.kind === "kindergarten" ? "kindergarten" : "school";
+  showTable({id: j.historyId, file: j.file, deals: j.deals, original: j.deals, school: j.school || "",
+             fileSchool: j.school || "", prefix: "", kind: k, fileKind: k, warnings: j.warnings || []});
+}
+
+// показать таблицу: только что загруженную или из «Истории»
+function showTable(e){
+  const strip = list => clone(list || []).map(d => { delete d._final; return d; });
+  histId = e.id || null; curFile = e.file || ""; curWarnings = e.warnings || [];
+  original = strip(e.original); deals = strip(e.deals); school = e.school || ""; prefix = e.prefix || "";
+  fileSchool = e.fileSchool || ""; kind = KIND[e.kind] ? e.kind : "school"; fileKind = KIND[e.fileKind] ? e.fileKind : kind;
+  const j = {file: curFile, warnings: curWarnings};
+  lastSaved = histSig();
   document.body.classList.add("loaded");
   $("#drop").innerHTML = '<span class="big-t">Другой файл…</span>';
   const refused = deals.filter(d => d.refused && !d.red).length, red = deals.filter(d => d.red).length, done = deals.filter(isDone).length;
@@ -333,7 +366,7 @@ async function upload(f){
         <button type="button" data-kind="school">Школа</button><button type="button" data-kind="kindergarten">Детский сад</button>
       </span></span>
     <label><span id="placeLbl"></span> <input id="school" value="${esc(school)}" title="Поменяет название во всех сделках"></label>
-    <label title="Добавляется в начало названия всех сделок и «Названия компании», например НГ → «НГ 3в Под_18-сп1»">Префикс <input id="prefix" value="" placeholder="например, НГ" size="10"></label>
+    <label title="Добавляется в начало названия всех сделок и «Названия компании», например НГ → «НГ 3в Под_18-сп1»">Префикс <input id="prefix" value="${esc(prefix)}" placeholder="например, НГ" size="10"></label>
     <span><span id="unitsLbl"></span>: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
     ${red ? `<span>Красные в файле: <b>${red}</b> (не отмечены)</span>` : ""}
@@ -453,7 +486,8 @@ $("#btnRestore").onclick = () => {
 };
 $("#btnClear").onclick = () => {
   if(S.running) return;
-  if(!confirm("Очистить список? В amoCRM ничего не удалится.")) return;
+  if(!confirm("Убрать таблицу с экрана? Она останется в «Истории», в amoCRM ничего не удалится.")) return;
+  saveNow(); histId = null;
   deals = []; original = [];
   document.body.classList.remove("loaded");
   $("#drop").innerHTML = '<div class="big-t">Перетащите сюда отчёт .xlsx</div>или нажмите, чтобы выбрать файл';
@@ -504,7 +538,9 @@ function updateUI(){
   btn.title = bad ? `У ${bad} выбранных есть замечания (подсвечены жёлтым) — можно создавать и так` : "";
   $("#btnStop").classList.toggle("hidden", !S.running);
   $("#btnRetry").classList.toggle("hidden", S.running || !failedRows().length);
-  $("#btnNotes").classList.toggle("hidden", S.running || !noteRows().length);
+  $("#btnNotes").classList.toggle("hidden", S.running || !$("#maxChat").value.trim() || !noteRows().length);
+  $("#histBtn").disabled = !!S.running;
+  autosave();
   const selectable = deals.filter(d => !isDone(d));
   $("#all").checked = selectable.length > 0 && selectable.every(d => d.sel);
   document.querySelectorAll("button.x").forEach(b => b.disabled = S.running);
@@ -518,7 +554,8 @@ async function run(list, notesOnly = false){
   if(notesOnly){
     if(!maxChat){ alert("Впишите название чата MAX со списками детей"); $("#maxChat").focus(); return; }
     if(!confirm(`Добавить списки детей из чата MAX «${maxChat}» в ${items.length} ${plural(items.length,"созданную сделку","созданные сделки","созданных сделок")}?`)) return;
-    if(await post("/api/run", {deals: items, pipeline: $("#pipeline").value || "-", maxChat, notesOnly: true})) poll();
+    saveNow();
+    if(await post("/api/run", {deals: items, pipeline: $("#pipeline").value || "-", maxChat, notesOnly: true, historyId: histId})) poll();
     return;
   }
   if(items.some(i => !i.name)){ alert("У некоторых сделок пустое название"); return; }
@@ -530,13 +567,16 @@ async function run(list, notesOnly = false){
   msg += maxChat ? `\n\nСписки детей — из чата MAX «${maxChat}».` : "\n\nЧат MAX не указан — без списков детей.";
   if(!S.loggedIn) msg += "\n\nОткроется окно amoCRM — если попросит, войдите в аккаунт.";
   if(!confirm(msg)) return;
-  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat})) poll();
+  saveNow();
+  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, historyId: histId})) poll();
 }
 $("#btnRun").onclick = () => run(selected());
 $("#btnRetry").onclick = () => run(failedRows());
 $("#btnNotes").onclick = () => run(noteRows(), true);
-$("#maxChat").value = store.get("maxChat");
-$("#maxChat").onchange = e => store.set("maxChat", e.target.value.trim());
+// чат MAX необязателен и после перезапуска всегда пустой (раньше запоминался — забываем)
+try{ localStorage.removeItem("maxChat"); }catch(e){}
+$("#maxChat").value = "";
+$("#maxChat").oninput = () => updateUI();
 $("#btnStop").onclick = () => post("/api/stop");
 $("#btnContinue").onclick = () => post("/api/continue");
 $("#conn").onclick = () => { if(S.phase !== "run") post("/api/login"); };  // старое окно amoCRM закроется
@@ -552,6 +592,68 @@ function fillPipelines(list){
   sel.innerHTML = list.map(p => `<option ${p===saved?"selected":""}>${esc(p)}</option>`).join("");
 }
 $("#pipeline").onchange = e => store.set("pipeline", e.target.value);
+
+// ---------- история таблиц ----------
+let lastSaved = "", saveTimer = null;
+const histSig = () => JSON.stringify({file: curFile, kind, fileKind, school, fileSchool, prefix, warnings: curWarnings,
+  deals: deals.map(({_final, ...d}) => d), original: original.map(({_final, ...d}) => d)});
+function saveNow(){
+  clearTimeout(saveTimer); saveTimer = null;
+  if(!histId) return;
+  const sig = histSig();
+  if(sig === lastSaved) return;
+  lastSaved = sig;
+  fetch(`/api/history/${histId}`, {method:"POST", headers:{"Content-Type":"application/json"}, body: sig, keepalive: true})
+    .catch(() => { lastSaved = ""; });
+}
+// правки, галочки, отметки «создана» — сохраняются сами через секунду после изменения
+function autosave(){
+  if(!histId || saveTimer || histSig() === lastSaved) return;
+  saveTimer = setTimeout(saveNow, 1000);
+}
+window.addEventListener("pagehide", saveNow);
+
+const HSTATE = {
+  done:  h => `✓ закончена · ${h.created}/${h.total}`,
+  work:  h => `в работе · создано ${h.created} из ${h.created + h.pending + h.partial}` + (h.partial ? `, не полностью ${h.partial}` : ""),
+  new:   h => `не начата · ${h.pending} к созданию`,
+  empty: () => "пустая",
+};
+const fmtAt = s => { const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d:\d\d)/.exec(s || ""); return m ? `${m[3]}.${m[2]} ${m[4]}` : (s || ""); };
+async function openHistoryMenu(){
+  const pop = $("#histPop");
+  pop.innerHTML = '<div class="hempty">Загрузка…</div>'; pop.classList.remove("hidden");
+  $("#histBtn").setAttribute("aria-expanded", "true");
+  saveNow();
+  let items = [];
+  try{ items = (await (await fetch("/api/history")).json()).items || []; }catch(e){}
+  if(!items.length){ pop.innerHTML = '<div class="hempty">Пока пусто — здесь появятся загруженные таблицы и что с ними делали.</div>'; return; }
+  pop.innerHTML = items.map(h => {
+    const acts = (h.actions || []).slice().reverse();
+    return `<button class="hitem${h.id === histId ? " cur" : ""}" data-hid="${esc(h.id)}" role="menuitem"
+      title="${esc(acts.map(a => fmtAt(a.at) + "  " + a.text).join("\n"))}">
+      <div class="h1"><b>${esc(h.file)}</b><span class="hstate st-${esc(h.state)}">${esc((HSTATE[h.state] || HSTATE.empty)(h))}</span></div>
+      <div class="h2">${esc(h.school ? h.school + " · " : "")}изменена ${esc(fmtAt(h.updated))}</div>
+      ${acts[0] ? `<div class="h3">${esc(fmtAt(acts[0].at) + " — " + acts[0].text)}</div>` : ""}
+    </button>`;
+  }).join("");
+}
+function closeHistoryMenu(){ $("#histPop").classList.add("hidden"); $("#histBtn").setAttribute("aria-expanded", "false"); }
+$("#histBtn").onclick = e => { e.stopPropagation(); $("#histPop").classList.contains("hidden") ? openHistoryMenu() : closeHistoryMenu(); };
+document.addEventListener("click", e => { if(!e.target.closest(".hist")) closeHistoryMenu(); });
+document.addEventListener("keydown", e => { if(e.key === "Escape") closeHistoryMenu(); });
+$("#histPop").addEventListener("click", async e => {
+  const b = e.target.closest("[data-hid]"); if(!b) return;
+  closeHistoryMenu();
+  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
+  if(b.dataset.hid === histId) return;
+  saveNow();
+  const r = await fetch(`/api/history/${encodeURIComponent(b.dataset.hid)}`);
+  const j = await r.json().catch(() => ({}));
+  if(!r.ok){ alert(j.error || "Не удалось открыть таблицу"); return; }
+  S.rows = {}; S.total = 0;
+  showTable(j.entry);
+});
 
 // ---------- состояние с сервера ----------
 async function poll(){
@@ -578,7 +680,8 @@ async function poll(){
   if(S.total){
     const finished = S.doneN + S.failedN;
     $("#barFill").style.width = Math.round(finished / S.total * 100) + "%";
-    $("#pCount").innerHTML = `Создано <b>${S.doneN}</b> из <b>${S.total}</b>` + (S.failedN ? ` · ошибок <b>${S.failedN}</b>` : "");
+    $("#pCount").innerHTML = `Готово <b>${S.doneN}</b> из <b>${S.total}</b>`
+      + (S.notesN ? ` · списков детей <b>${S.notesN}</b>` : "") + (S.failedN ? ` · ошибок <b>${S.failedN}</b>` : "");
     document.title = S.running ? `${finished}/${S.total} · Сделки в amoCRM` : "Сделки в amoCRM";
   }
   $("#lastLog").textContent = S.running ? (S.log[S.log.length-1] || "").replace(/^\S+\s+/, "") : "";

@@ -9,6 +9,9 @@ browser-profile/
 logs/
 uploads/
 progress.json
+history.json
+*.json.bad
+*.json.tmp
 *.xlsx
 
 # локальные настройки инструментов
