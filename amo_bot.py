@@ -340,8 +340,8 @@ class AmoBot:
         """Уводит курсор в правую часть окна, чтобы закрылось всплывающее меню «Сделки»."""
         p = self.page
         w, h = p.evaluate("[window.innerWidth, window.innerHeight]")
-        p.mouse.move(w * 0.75, h * 0.6, steps=5)
-        self._sleep(600)
+        p.mouse.move(w * 0.75, h * 0.6, steps=3)
+        self._sleep(250)
 
     def _is_clickable(self, loc: Locator) -> bool:
         """Не перекрыт ли элемент затемнением/всплывашкой: что лежит сверху в его центре."""
@@ -469,7 +469,7 @@ class AmoBot:
             save_btn.locator("visible=true").first.wait_for(state="hidden", timeout=20000)
         except PWTimeout:
             raise RuntimeError("После «Сохранить» кнопка не исчезла — amoCRM не сохранил изменения")
-        p.wait_for_timeout(1500)
+        p.wait_for_timeout(500)
 
     def create_deal(self, deal: Deal, pipeline: str = "") -> str:
         """Создаёт сделку, возвращает её URL."""
@@ -496,55 +496,119 @@ class AmoBot:
                 return loc.last
         raise RuntimeError("Не нашёл поле «Примечание» внизу карточки сделки")
 
-    def _note_mode(self, comp: Locator):
-        """Включает режим «Примечание», если в поле выбран «Чат» или «Задача»."""
+    def _note_via_api(self, text: str) -> bool:
+        """Примечание через API amoCRM из залогиненной страницы: мгновенно и без поля ввода.
+        False — API не принял (тогда пишем через поле внизу карточки)."""
+        m = re.search(r"/leads/detail/(\d+)", self.page.url)
+        if not m:
+            return False
+        try:
+            res = self.page.evaluate("""async ([id, text]) => {
+                const csrf = (document.cookie.match(/(?:^|;\\s*)csrf_token=([^;]+)/) || [])[1];
+                const headers = {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json',
+                                 'Content-Type': 'application/json'};
+                if (csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
+                const r = await fetch(`/api/v4/leads/${id}/notes`, {method: 'POST', credentials: 'include',
+                    headers, body: JSON.stringify([{note_type: 'common', params: {text}}])});
+                let body = ''; try { body = await r.text(); } catch (e) {}
+                return {status: r.status, body: body.slice(0, 300)};
+            }""", [int(m.group(1)), text])
+        except Exception as e:  # noqa: BLE001
+            if is_closed_error(e):
+                raise
+            self.log_cb(f"   API примечаний недоступен ({str(e).splitlines()[0][:120]}), пишу через поле")
+            return False
+        if res["status"] in (200, 201) and '"id"' in res["body"]:
+            return True
+        self.log_cb(f"   API примечаний ответил {res['status']}, пишу через поле")
+        return False
+
+    @staticmethod
+    def _composer_mode(comp: Locator) -> str:
+        """Режим поля ввода по началу текста: «примечание», «чат», «задача»."""
         try:
             head = comp.inner_text(timeout=1000)
         except Exception:  # noqa: BLE001
-            head = ""
-        if head.strip().lower().startswith(SEL["note_text"].lower()):
-            return
-        switcher = comp.locator(SEL["note_switcher"]).locator("visible=true").first
-        if switcher.count():
-            switcher.click()
-            self._sleep(400)
-            opt = self.page.get_by_text(SEL["note_text"], exact=True).locator("visible=true").last
-            if opt.count():
-                opt.click()
-                self._sleep(400)
+            return ""
+        m = re.match(r"\s*([А-Яа-яЁё]+)", head)
+        return m.group(1).lower() if m else ""
+
+    # Пункт «Примечание» в раскрывшемся меню режимов — ближайший к переключателю видимый элемент
+    # с ровно этим текстом (самый глубокий, чтобы клик пришёлся на сам пункт).
+    _NOTE_OPTION_JS = """([word, x, y]) => {
+        const items = [...document.querySelectorAll('body *')].filter(el => {
+            if ((el.innerText || '').trim() !== word) return false;
+            if ([...el.children].some(c => (c.innerText || '').trim() === word)) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+        }).map(el => { const r = el.getBoundingClientRect();
+            return {x: r.x + r.width / 2, y: r.y + r.height / 2}; });
+        items.sort((a, b) => Math.hypot(a.x - x, a.y - y) - Math.hypot(b.x - x, b.y - y));
+        return items[0] || null;
+    }"""
+
+    def _switch_to_note(self, comp: Locator):
+        """Переключает поле ввода в «Примечание». Не получилось — ошибка ДО ввода текста:
+        в режиме «Чат» текст ушёл бы клиенту."""
+        want = SEL["note_text"].lower()
+        for _ in range(3):
+            mode = self._composer_mode(comp)
+            if mode == want:
+                return
+            self.check_stop()
+            link = comp.get_by_text(re.compile(rf"^\s*{re.escape(mode)}\s*$", re.I)).first if mode else None
+            if link is None or not link.count():
+                link = comp.locator(SEL["note_switcher"]).locator("visible=true").first
+            box = link.bounding_box() if link.count() else None
+            if not box:
+                break
+            link.click()
+            self._sleep(300)
+            opt = self.page.evaluate(self._NOTE_OPTION_JS,
+                                     [SEL["note_text"], box["x"] + box["width"] / 2, box["y"] + box["height"] / 2])
+            if opt:
+                self.page.mouse.click(opt["x"], opt["y"])
+            self._sleep(300)
+        if self._composer_mode(comp) != want:
+            raise RuntimeError("Не удалось переключить поле внизу сделки на «Примечание» — текст не вписан")
 
     def add_note(self, text: str):
-        """Пишет примечание в открытую сделку и нажимает «Добавить». Строки — через Shift+Enter."""
+        """Добавляет примечание в открытую сделку: через API amoCRM, а если он не принял —
+        через поле «Примечание» внизу карточки и кнопку «Добавить» (только в режиме «Примечание»)."""
         p = self.page
+        lines = text.split("\n")
+        self._pause(f"Будет добавлено примечание со списком детей ({len(lines) - 1}). «Продолжить» — добавить")
         self.check_stop()
-        self._mouse_away()
+        if self._note_via_api(text):
+            return
         comp = self._note_composer()
         comp.scroll_into_view_if_needed(timeout=3000)
-        self._note_mode(comp)
+        self._switch_to_note(comp)
         area = comp.locator('[contenteditable="true"], textarea').locator("visible=true").first
-        (area if area.count() else comp).click()
-        self._sleep(300)
-        lines = text.split("\n")
+        box = area if area.count() else comp
+        box.click()
+        p.keyboard.press("Control+A")  # поле могло остаться с прошлым текстом
+        p.keyboard.press("Delete")
         for i, line in enumerate(lines):
             if i:
                 p.keyboard.press("Shift+Enter")
             p.keyboard.insert_text(line)
-        self._pause(f"Примечание вписано ({len(lines) - 1} строк). «Продолжить» — нажать «Добавить»")
         self.check_stop()
+        if self._composer_mode(comp) != SEL["note_text"].lower():  # режим сменился во время ввода
+            p.keyboard.press("Control+A")
+            p.keyboard.press("Delete")
+            raise RuntimeError("Поле внизу сделки не в режиме «Примечание» — текст стёрт, ничего не отправлено")
         btn = comp.get_by_role("button", name=SEL["note_add_text"], exact=True).or_(
-            comp.get_by_text(SEL["note_add_text"], exact=True)).locator("visible=true").first
+            comp.locator(f'button:has-text("{SEL["note_add_text"]}")')).locator("visible=true").first
         if not btn.count():
-            btn = p.get_by_text(SEL["note_add_text"], exact=True).locator("visible=true").last
+            raise RuntimeError("Не нашёл кнопку «Добавить» у примечания")
         btn.click()
-        # примечание добавлено — поле ввода очищается
-        probe = lines[-1].strip()
-        box = area if area.count() else comp
-        end = time.time() + 15
-        while probe in box.inner_text(timeout=2000):
+        probe = lines[-1].strip()  # примечание добавлено — поле ввода очищается
+        end = time.time() + 10
+        while probe and probe in box.inner_text(timeout=2000):
             if time.time() > end:
                 raise RuntimeError("Примечание не добавилось (текст остался в поле)")
-            self._sleep(300)
-        p.wait_for_timeout(800)
+            self._sleep(250)
 
     # ---------- диагностика ----------
     def probe(self) -> Path:

@@ -1,6 +1,6 @@
 {
   "amo_url": "https://fmaniaamo.amocrm.ru",
-  "slow_mo_ms": 150,
+  "slow_mo_ms": 60,
   "port": 8765,
   "pipelines": [
     "Клиентский Отдел",

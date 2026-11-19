@@ -260,7 +260,7 @@ class MaxChat:
             if pos is None:
                 break
             moved = abs(pos["after"] - pos["before"]) > 1
-            self._sleep(400 if moved else 1200)  # у начала MAX догружает старые сообщения
+            self._sleep(200 if moved else 1000)  # у начала MAX догружает старые сообщения
             if moved:
                 still = 0
             else:

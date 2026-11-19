@@ -366,7 +366,12 @@ def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, sta
         bot.open_new_deal(pipeline)
         bot.fill_deal_name(name)
     todo = contacts[state["contacts_done"]:]
-    for c in todo:
+    for i, c in enumerate(todo):
+        if i and state.get("just_created"):
+            # Сразу после первого «Сохранить» карточка перестраивается, и форма следующего
+            # контакта не находилась (ошибка через 15 с и повтор). Открываем сделку заново — 2–3 с.
+            bot.open_deal(state["url"])
+            state["just_created"] = False
         bot.fill_contact(c, company=name)  # «Название компании» = класс + школа
         bot._pause(f"«{name}»: заполнен {c.role} ({c.name}). Проверьте форму и нажмите «Продолжить» — будет «Сохранить»")
         bot.save()
@@ -374,6 +379,7 @@ def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, sta
             if "/leads/detail/" not in bot.page.url:
                 raise RuntimeError("После «Сохранить» сделка не создалась")
             state["url"] = bot.deal_url()
+            state["just_created"] = True
         state["contacts_done"] += 1
     if not state["url"]:  # сделка без контактов
         bot._pause(f"«{name}»: контактов нет. «Продолжить» — сохранить")
