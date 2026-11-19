@@ -15,7 +15,7 @@ import time
 
 from playwright.sync_api import BrowserContext, Page
 
-from kids_lists import find_lists
+from kids_lists import collect_lists, full_list_keys, merge_history
 
 MAX_URL = os.environ.get("AMO_MAX_URL", "https://web.max.ru/")  # другой адрес — только для проверок на макете
 _MAX_HOST = MAX_URL.split("://", 1)[-1].split("/", 1)[0]
@@ -229,7 +229,8 @@ class MaxChat:
     def read_lists(self, chat: str, need: set[str]) -> dict[str, str]:
         """Списки детей по классам (ключ kids_lists.class_key → текст), самые новые.
 
-        Листает историю снизу вверх, пока не найдёт все нужные классы или не дойдёт до начала.
+        Листает историю снизу вверх, пока у всех нужных классов не найдётся полный список
+        или не дойдёт до начала чата (короткие записи вида «4в Сизинцева София» тоже собираются).
         """
         self.open()
         self.open_chat(chat)
@@ -241,20 +242,16 @@ class MaxChat:
             raise RuntimeError("В чате MAX не видно сообщений")
         self.page.evaluate(_SCROLL_BOTTOM_JS)
         self._sleep(800)
-        result: dict[str, str] = {}
-        seen_bubbles = 0
+        history: list[str] = []  # тексты сообщений от старых к новым
+        full: set[str] = set()     # классы, у которых уже найден полный список
         still = 0
         for step in range(SCROLL_MAX_STEPS):
             self._check_stop()
-            bubbles = self.page.evaluate(_BUBBLES_JS)
-            seen_bubbles = max(seen_bubbles, len(bubbles))
-            latest: dict[str, str] = {}
-            for text in bubbles:  # сверху вниз: последний найденный — самый новый на экране
-                for key, body in find_lists(text):
-                    latest[key] = body
-            for key, body in latest.items():
-                result.setdefault(key, body)  # то, что нашли ниже (раньше), новее
-            if need and need <= set(result):
+            before = len(history)
+            history = merge_history(history, self.page.evaluate(_BUBBLES_JS))
+            full |= full_list_keys(history[:len(history) - before])
+            # полный список найден — более старые сообщения его уже не изменят
+            if need and need <= full:
                 break
             pos = self.page.evaluate(_SCROLL_UP_JS)
             if pos is None:
@@ -269,5 +266,5 @@ class MaxChat:
                 if still >= 3:  # начало чата: прокрутка стоит и ничего не догружается
                     break
             if step and step % 20 == 0:
-                self.log(f"MAX: листаю историю… найдено классов: {len(result)}")
-        return result
+                self.log(f"MAX: листаю историю… сообщений: {len(history)}, полных списков: {len(full & need)}")
+        return collect_lists(history)

@@ -1,15 +1,20 @@
-"""Списки детей из чата MAX: поиск сообщения «класс + список» и сопоставление с классом сделки.
+"""Списки детей из чата MAX: поиск сообщений с классом и сопоставление с классом сделки.
 
-Сообщение в беседе выглядит так:
+Сообщения в беседе пишут по-разному, правило — «лучше вставить лишнее, чем ничего»:
 
-    6Б
+    6Б                        3А                           4в Сизинцева София
+    1.Грузинов Владислав      Идут на фотосессию :
+    2.Леонтьев Артём          1. Соломин Толя
+                              2. Герасимова Вика (убрать невидимку)
 
-    1.Грузинов Владислав
-    2.Леонтьев Артём
+* Полный список — строка-заголовок с классом («6Б», «6 Б», «6-б», «6 «Б»», «6Б класс», латинская «B»)
+  и все строки после неё до следующего заголовка: пометки в скобках, фамилии без имён, пояснения.
+* Короткая запись — класс в начале строки и сразу текст («4в Сизинцева София»): в примечание
+  идёт всё сообщение.
 
-Класс пишут по-разному: «6Б», «6 Б», «6-б», «6 «Б»», «6Б класс», латинской «B». Всё приводится
-к одному ключу «6б». Для детского сада: «гр.11», «группа 11», «11 группа» → «11».
-Если для класса несколько сообщений — берётся последнее (самое новое).
+Последний полный список класса заменяет прежние; короткие записи после него дописываются
+к нему. Полного списка нет — берутся все короткие записи класса.
+Для детского сада: «гр.11», «группа 11», «11 группа» → ключ «11».
 """
 
 from __future__ import annotations
@@ -18,12 +23,14 @@ import re
 
 # латинские буквы, похожие на русские (часто печатают «5B» вместо «5В»)
 _LATIN = str.maketrans("abcehkmoptxy", "авсенкмортху")
-_WORDS_RE = re.compile(r"\b(класс\w*|кл|группа|гр|group)\b\.?", re.I)
+_WORDS_RE = re.compile(r"\b(класс\w*|кл|группа|гр|group|список\w*)\b\.?", re.I)
 _KEY_RE = re.compile(r"^\d{1,2}[а-я]{0,2}$")
-_TIME_RE = re.compile(r"^\s*(\d{1,2}:\d{2})(\s*(изменено|ред\.?))?\s*$", re.I)
-_NUMBERED_RE = re.compile(r"^\s*\d{1,3}\s*[.)\-–:]?\s*\S")
-_ITEM_NO_RE = re.compile(r"^\s*(\d{1,3})\s*[.)\-–:]\s*\S")  # «10.Ли», «3) Иванов»
-_NAME_RE = re.compile(r"^[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\-'’]*(\s+[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\-'’.]*){0,3}$")
+_TIME_RE = re.compile(r"^\s*(ред\.?\s*)?\d{1,2}:\d{2}(\s*(изменено|ред\.?))?\s*$", re.I)
+_ITEM_NO_RE = re.compile(r"^\s*\d{1,3}\s*[.)\-–:]\s*\S")  # «10.Ли», «3) Иванов» — ребёнок, не класс
+# «4в Сизинцева София», «3 «В»: Антонов» — класс в начале строки и текст после него
+_INLINE_RE = re.compile(
+    r"^\s*(\d{1,2})\s*[-–]?\s*[«\"']?([А-Яа-яЁёA-Za-z])[»\"']?"
+    r"(?:\s*(?:класс\w*|кл\.?))?(?=[\s,:;.\-–])[\s,:;.\-–]+(\S.*)$", re.I)
 
 
 def class_key(text: str) -> str:
@@ -35,76 +42,82 @@ def class_key(text: str) -> str:
     return s if _KEY_RE.match(s) else ""
 
 
-def _is_class_line(line: str) -> str:
-    """Ключ класса, если строка — заголовок списка (короткая, только класс)."""
+def _header_key(line: str) -> str:
+    """Ключ класса, если строка целиком — заголовок («6Б», «Список 3А:»)."""
     line = line.strip()
     if not line or len(line) > 25:
         return ""
     return class_key(line)
 
 
-def _is_entry(line: str, numbered: bool | None) -> bool:
-    s = line.strip()
-    if not s or _TIME_RE.match(s):
-        return False
-    if numbered is None:
-        return bool(_NUMBERED_RE.match(s) or _NAME_RE.match(s))
-    return bool(_NUMBERED_RE.match(s)) if numbered else bool(_NAME_RE.match(s))
+def _inline_key(line: str) -> str:
+    m = _INLINE_RE.match(line)
+    return class_key(m.group(1) + m.group(2)) if m else ""
+
+
+def parse_message(text: str) -> list[tuple[str, str, bool]]:
+    """Списки в одном сообщении: [(ключ класса, текст, полный ли список), ...]."""
+    lines = [ln.rstrip() for ln in text.replace("\r", "").split("\n")]
+    lines = [ln for ln in lines if ln.strip() and not _TIME_RE.match(ln)]
+    out: list[tuple[str, str, bool]] = []
+    key, head, body = "", "", []
+
+    def flush():
+        if key and body:
+            out.append((key, "\n".join([head, *body]), True))
+
+    for ln in lines:
+        s = ln.strip()
+        k = "" if (key and _ITEM_NO_RE.match(s)) else _header_key(s)
+        if k:
+            flush()
+            key, head, body = k, s, []
+        elif key:
+            body.append(s)
+    flush()
+    if out:
+        return out
+    # короткая запись: класс в начале одной из первых строк (первой может быть имя отправителя)
+    for s in [ln.strip() for ln in lines[:2]]:
+        k = _inline_key(s)
+        if k:
+            return [(k, "\n".join(ln.strip() for ln in lines), False)]
+    return []
+
+
+def collect_lists(messages: list[str]) -> dict[str, str]:
+    """Списки по классам из сообщений чата (от старых к новым)."""
+    parts: dict[str, list[str]] = {}
+    for msg in messages:
+        for key, body, full in parse_message(msg):
+            if full:
+                parts[key] = [body]
+            elif body not in parts.setdefault(key, []):
+                parts[key].append(body)
+    return {k: "\n".join(v) for k, v in parts.items()}
+
+
+def full_list_keys(messages: list[str]) -> set[str]:
+    """Классы, у которых в этих сообщениях есть полный список (дальше в прошлое искать не нужно)."""
+    return {key for msg in messages for key, _, full in parse_message(msg) if full}
 
 
 def find_lists(text: str) -> list[tuple[str, str]]:
-    """Все списки в тексте по порядку: [(ключ класса, текст списка), ...].
+    """[(ключ, текст)] из одного сообщения — для журнала и проверок."""
+    return [(k, b) for k, b, _ in parse_message(text)]
 
-    Текст списка — заголовок класса как в сообщении и строки детей (пустые строки убраны).
+
+def merge_history(history: list[str], older: list[str]) -> list[str]:
+    """Склеивает уже прочитанную историю (от старых к новым) с более старым «снимком» экрана.
+
+    Снимки перекрываются: ищем самое длинное совпадение конца `older` с началом `history`.
     """
-    lines = text.replace("\r", "").split("\n")
-    out: list[tuple[str, str]] = []
-    i = 0
-    while i < len(lines):
-        key = _is_class_line(lines[i])
-        if not key:
-            i += 1
-            continue
-        head = lines[i].strip()
-        entries: list[str] = []
-        numbered: bool | None = None
-        j = i + 1
-        while j < len(lines):
-            s = lines[j].strip()
-            if not s:  # пустые строки внутри сообщения допустимы
-                j += 1
-                continue
-            num = _ITEM_NO_RE.match(s)
-            # «10.Ли» похоже на заголовок класса «10Л», но это следующий по номеру ребёнок
-            next_item = numbered is not False and num and int(num.group(1)) == len(entries) + 1
-            if not next_item and (_is_class_line(s) or not _is_entry(s, numbered)):
-                break
-            if numbered is None:
-                numbered = bool(_NUMBERED_RE.match(s))
-            entries.append(s)
-            j += 1
-        if entries:
-            out.append((key, "\n".join([head, *entries])))
-            i = j
-        else:
-            i += 1
-    return out
-
-
-def merge_snapshots(snapshots: list[str]) -> dict[str, str]:
-    """Списки по классам из нескольких «снимков» чата.
-
-    snapshots — от самого нового (низ чата) к более старым (прокрутка вверх). Внутри снимка
-    последний список класса новее; найденный в более новом снимке не заменяется более старым.
-    """
-    result: dict[str, str] = {}
-    for snap in snapshots:
-        latest: dict[str, str] = {}
-        for key, body in find_lists(snap):
-            latest[key] = body
-        for key, body in latest.items():
-            result.setdefault(key, body)
-    return result
+    if not history:
+        return list(older)
+    for k in range(min(len(older), len(history)), 0, -1):
+        if older[-k:] == history[:k]:
+            return older[:-k] + history
+    return older + history
 
 
 def count_kids(body: str) -> int:

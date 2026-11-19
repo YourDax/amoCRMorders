@@ -6,34 +6,55 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from kids_lists import class_key, count_kids, find_lists, merge_snapshots  # noqa: E402
+from kids_lists import (class_key, collect_lists, count_kids, find_lists, full_list_keys,  # noqa: E402
+                        merge_history, parse_message)
 
-CHAT = """Мария Ивановна
-6Б
-
-1.Грузинов Владислав
-2.Леонтьев Артём
-3.Бойко Богдан
-12:40
-Ольга Петровна
-5 Б
-1) Иванов Иван
-2) Петров Пётр
-12:41
-Спасибо, получили!
-12:45
-Ольга Петровна
-5-б класс
-1. Иванов Иван
-2. Петров Пётр
-3. Сидорова Анна
-13:02
-"""
+# сообщения из настоящей беседы (скриншоты пользователя)
+MSG_1V = """1в
+Белова Василиса (убрать невидимки)
+Деньгин Роман
+Вдовина Мирослава
+Краснова Елена
+Ярцева Ванесса
+Рябова Стефания"""
+MSG_3G = """3г
+Захарченко Есения (убрать невидимки)
+Кучиных Кирилл
+Беспалова Анна (убрать невидимки)"""
+MSG_3A = """3А
+Идут на фотосессию :
+1. Соломин Толя
+2. Герасимова Вика (убрать невидимку)
+3. Фомичева Марьяна (убрать невидимки)
+4. Измайлова Маша (убрать невидимки)
+5. Фарафонов Ваня
+6. Елесина Серафима
+7. Сима Козлова
+8. Каргин Ваня
+9. Чуреева Алиса
+10. Шилина Настя
+11. Белобородова Варя
+12. Яковлев Андрей
+13. Шмакова Милослава
+14. Козлова Серафима"""
+MSG_3B = """3б
+Шустрова (убрать невидимки)
+  Аванесян (убрать невидимки)
+  Елесин
+  Липилов
+  Плескачевская (убрать невидимки)
+  Михеев
+  Крючков
+  Балдохина
+  Олишевская"""
+MSG_1B = "1б\n" + "\n".join(f"{n}.{k}" for n, k in enumerate(
+    ["Костин", "Мусаев", "Бахтина", "Долганин", "Хохлов", "Саранчин", "Гетманский", "Чичева",
+     "Брндаренко", "Ли", "Брагин", "Лузгин", "Асатрян", "Самойленко"], 1))
 
 
 class ClassKey(unittest.TestCase):
     def test_variants(self):
-        for s in ("5б", "5 Б", "5-Б", "5 «Б»", '5"Б"', "5Б класс", "5 б кл."):
+        for s in ("5б", "5 Б", "5-Б", "5 «Б»", '5"Б"', "5Б класс", "5 б кл.", "Список 5Б:"):
             self.assertEqual(class_key(s), "5б", s)
         self.assertEqual(class_key("10А"), "10а")
         self.assertEqual(class_key("5B"), "5в")  # латинская B = русская В
@@ -45,43 +66,51 @@ class ClassKey(unittest.TestCase):
             self.assertEqual(class_key(s), "", s)
 
 
-class FindLists(unittest.TestCase):
-    def test_lists(self):
-        found = find_lists(CHAT)
-        self.assertEqual([k for k, _ in found], ["6б", "5б", "5б"])
-        self.assertEqual(found[0][1].split("\n")[0], "6Б")
-        self.assertEqual(count_kids(found[0][1]), 3)
-        self.assertNotIn("12:40", found[0][1])
-        self.assertNotIn("Ольга", found[0][1])
+class Messages(unittest.TestCase):
+    def test_real_full_lists(self):
+        for msg, key, kids in ((MSG_1V, "1в", 6), (MSG_3G, "3г", 3), (MSG_3B, "3б", 9), (MSG_1B, "1б", 14)):
+            found = parse_message(msg)
+            self.assertEqual([(k, full) for k, _, full in found], [(key, True)], msg)
+            self.assertEqual(count_kids(found[0][1]), kids, msg)
+        body = parse_message(MSG_3A)[0][1]
+        self.assertIn("Идут на фотосессию", body)  # лишнее не страшно
+        self.assertIn("14. Козлова Серафима", body)
+        self.assertIn("Шустрова (убрать невидимки)", parse_message(MSG_3B)[0][1])
 
-    def test_latest_wins(self):
-        lists = merge_snapshots([CHAT])
-        self.assertEqual(count_kids(lists["5б"]), 3)
-        self.assertIn("Сидорова Анна", lists["5б"])
+    def test_inline(self):
+        self.assertEqual(parse_message("3в Антонов и Антонова 6а"), [("3в", "3в Антонов и Антонова 6а", False)])
+        self.assertEqual(parse_message("София\n4в Сизинцева София"),
+                         [("4в", "София\n4в Сизинцева София", False)])
+        self.assertEqual(parse_message("Завтра в 10:00, не опаздывайте"), [])
+        self.assertEqual(parse_message("12 детей придут"), [])
 
-    def test_newer_snapshot_wins(self):
-        newer = "5б\n1. Новый Список\n"
-        older = "5б\n1. Старый Список\n2. Ещё Один\n"
-        self.assertIn("Новый", merge_snapshots([newer, older])["5б"])
-
-    def test_unnumbered(self):
-        lists = merge_snapshots(["7а\nИванов Иван\nПетрова Мария\n10:00\nПривет всем, как дела?"])
-        self.assertEqual(lists["7а"], "7а\nИванов Иван\nПетрова Мария")
-
-    def test_short_surname_not_class(self):
-        # «10.Ли» и «1.Ю» похожи на заголовки классов «10Л» / «1Ю», но это дети по порядку
-        kids = ["Костин", "Мусаев", "Бахтина", "Долганин", "Хохлов", "Саранчин", "Гетманский",
-                "Чичева", "Брндаренко", "Ли", "Брагин", "Лузгин", "Асатрян", "Самойленко"]
-        text = "1б\n" + "\n".join(f"{n}.{k}" for n, k in enumerate(kids, 1)) + "\n12:58"
-        found = find_lists(text)
-        self.assertEqual(len(found), 1)
-        self.assertEqual(count_kids(found[0][1]), 14)
-        self.assertEqual(count_kids(find_lists("2а\n1.Ю\n2.Ким")[0][1]), 2)
-        # а настоящий следующий класс после списка по-прежнему начинает новый список
+    def test_two_classes_in_one_message(self):
         self.assertEqual([k for k, _ in find_lists("1б\n1.Ли\n2.Ким\n2а\n1.Петров")], ["1б", "2а"])
 
-    def test_header_without_list_ignored(self):
-        self.assertEqual(find_lists("Завтра снимаем 6Б\n6Б\nВо сколько?"), [])
+    def test_time_and_header_only(self):
+        self.assertEqual(find_lists("6Б\n12:40"), [])
+        self.assertEqual(count_kids(find_lists("6Б\nИванов\nред. 10:17")[0][1]), 1)
+
+
+class Collect(unittest.TestCase):
+    def test_latest_full_wins_and_inline_appended(self):
+        msgs = ["5б\n1.Старый Список", "привет", "5 Б класс\n1) Новый Иван\n2) Новая Мария",
+                "5б Петров Пётр", "4в Сизинцева София", "3в Антонов и Антонова 6а", MSG_1V]
+        lists = collect_lists(msgs)
+        self.assertEqual(lists["5б"], "5 Б класс\n1) Новый Иван\n2) Новая Мария\n5б Петров Пётр")
+        self.assertEqual(lists["4в"], "4в Сизинцева София")
+        self.assertEqual(lists["1в"], MSG_1V)
+        self.assertEqual(full_list_keys(msgs), {"5б", "1в"})
+
+    def test_full_after_inline_replaces(self):
+        self.assertEqual(collect_lists(["7а Иванов", "7а\nИванов\nПетров"])["7а"], "7а\nИванов\nПетров")
+
+    def test_merge_history(self):
+        h = merge_history([], ["c", "d", "e"])
+        h = merge_history(h, ["a", "b", "c", "d"])  # прокрутка вверх, перекрытие «c d»
+        self.assertEqual(h, ["a", "b", "c", "d", "e"])
+        self.assertEqual(merge_history(h, ["a", "b"]), h)  # тот же экран — ничего нового
+        self.assertEqual(merge_history(["x"], ["w"]), ["w", "x"])  # без перекрытия
 
 
 if __name__ == "__main__":
