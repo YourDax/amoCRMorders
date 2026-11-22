@@ -96,6 +96,14 @@ class Messages(unittest.TestCase):
         self.assertEqual(count_kids(msg), 3)
         self.assertEqual(collect_lists([msg, "Третий Ребёнок добавился"]), {"2к": msg})
 
+    def test_counted_roster_with_comment(self):
+        roster = (
+            "1д (7чел) должно было быть 9, 2 заболели\nВремя 9:10\n"
+            + "\n".join(f"{i}. Иванов Ребёнок" for i in range(1, 8))
+        )
+        self.assertEqual(parse_message(roster), [("1д", roster, True)])
+        self.assertEqual(count_kids(collect_lists(["1д Старый Ребёнок", roster])["1д"]), 7)
+
     def test_time_and_header_only(self):
         self.assertEqual(find_lists("6Б\n12:40"), [])
         self.assertEqual(count_kids(find_lists("6Б\nИванов\nред. 10:17")[0][1]), 1)
@@ -120,9 +128,23 @@ class Collect(unittest.TestCase):
         self.assertEqual(h, ["a", "b", "c", "d", "e"])
         self.assertEqual(merge_history(h, ["a", "b"]), h)  # тот же экран — ничего нового
         self.assertEqual(merge_history(["x"], ["w"]), ["w", "x"])  # без перекрытия
+        self.assertEqual(merge_history(h, ["b", "c"]), h)
 
 
 class MaxChatReading(unittest.TestCase):
+    def test_journal_counts_unique_lists(self):
+        from max_chat import MaxChat
+
+        chat = MaxChat(None)
+        chat.warnings = []
+        roster = "1д (7чел) будет меньше\n1. Первый Ребёнок"
+        addon = "1д Другой Ребёнок"
+        self.assertEqual(chat._finish_lists([roster, roster, addon, addon], {"1д"}),
+                         {"1д": f"{roster}\n{addon}"})
+        self.assertEqual(len(chat.warnings), 1)
+        self.assertIn("найдено несколько сообщений (2)", chat.warnings[0])
+        self.assertIn("последний полный список", chat.warnings[0])
+
     def test_short_chat_without_scroller(self):
         from unittest.mock import Mock
         from max_chat import MaxChat, _BUBBLES_JS, _SCROLLER_JS
@@ -136,7 +158,7 @@ class MaxChatReading(unittest.TestCase):
             _SCROLLER_JS: False,
         }.__getitem__
         self.assertEqual(chat.read_lists("Чат", {"6ж"})["6ж"], "6 Ж\u200b\n1. Пример Ребёнок\n6ж Другой Ребёнок")
-        self.assertTrue(any("ответы с цитатами" in warning for warning in chat.warnings))
+        self.assertTrue(any("ответы на сообщения" in warning for warning in chat.warnings))
         self.assertTrue(any("6ж: найдено несколько сообщений (2)" in warning for warning in chat.warnings))
 
 

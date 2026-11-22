@@ -45,7 +45,15 @@ def class_key(text: str) -> str:
     return s if _KEY_RE.match(s) else ""
 
 
-_HEADER_COUNT_RE = re.compile(r"\s*[,;–—-]?\s+\d{1,3}\s*(?:чел(?:овек)?\.?|детей|реб[её]нка)\s*[:.]?$", re.I)
+_PAREN_COUNT_RE = re.compile(
+    r"^(.+?)\s*\(\s*\d{1,3}\s*(?:чел(?:овек[аи]?)?\.?|детей|ученик(?:а|ов))\s*\)",
+    re.I,
+)
+
+
+def _counted_header_key(line: str) -> str:
+    match = _PAREN_COUNT_RE.match(line)
+    return class_key(match[1]) if match else ""
 
 
 def _header_key(line: str) -> str:
@@ -89,6 +97,7 @@ def parse_message(text: str) -> list[tuple[str, str, bool]]:
     key, body, evidence, full = "", [], 0, False
     for i, line in enumerate(lines):
         header = "" if re.match(r"^\d+\s*[.):]", line) else _header_key(line)
+        header = header or _counted_header_key(line)
         inline = None if header else _inline(line)
         inline_key = inline[0] if inline else ""
         if header or inline_key:
@@ -119,11 +128,17 @@ def _joined_lists(messages):
         yield msg
 
 
+def message_lists(messages: list[str]):
+    """Разобранные списки по сообщениям, без повторов одного и того же текста."""
+    parsed = [tuple(parse_message(message)) for message in _joined_lists(messages)]
+    return reversed(dict.fromkeys(reversed(parsed)))
+
+
 def collect_lists(messages: list[str]) -> dict[str, str]:
     """Списки по классам из сообщений чата (от старых к новым)."""
     parts: dict[str, list[str]] = {}
-    for msg in _joined_lists(messages):
-        for key, body, full in parse_message(msg):
+    for entries in message_lists(messages):
+        for key, body, full in entries:
             if full:
                 parts[key] = [body]
             elif body not in parts.setdefault(key, []):
@@ -148,6 +163,8 @@ def merge_history(history: list[str], older: list[str]) -> list[str]:
     """
     if not history:
         return list(older)
+    if any(history[i:i + len(older)] == older for i in range(len(history) - len(older) + 1)):
+        return history
     for k in range(min(len(older), len(history)), 0, -1):
         if older[-k:] == history[:k]:
             return older[:-k] + history

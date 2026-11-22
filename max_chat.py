@@ -16,7 +16,7 @@ from collections import Counter
 
 from playwright.sync_api import BrowserContext, Page
 
-from kids_lists import collect_lists, full_list_keys, merge_history, parse_message
+from kids_lists import collect_lists, full_list_keys, merge_history, message_lists
 
 MAX_URL = os.environ.get("AMO_MAX_URL", "https://web.max.ru/")  # другой адрес — только для проверок на макете
 _MAX_HOST = MAX_URL.split("://", 1)[-1].split("/", 1)[0]
@@ -67,7 +67,8 @@ _BUBBLES_JS = r"""
     clean.querySelectorAll('div, p, li').forEach(el => el.append('\n'));
     return clean.textContent.split('\n').map(s => s.trim()).filter(Boolean).join('\n');
   };
-  const messages = bubbles.map(b => {
+  const originalMessages = bubbles.filter(b => !b.querySelector(quote));
+  const messages = originalMessages.map(b => {
     const texts = [...b.querySelectorAll('.text')].filter(t => {
       const excluded = t.closest(ignored);
       const parentText = t.parentElement.closest('.text');
@@ -76,7 +77,7 @@ _BUBBLES_JS = r"""
     });
     return (texts.length ? texts.map(cleanText).join('\n') : cleanText(b)).trim();
   }).filter(Boolean);
-  return {messages, hasReplies: bubbles.some(b => b.querySelector(quote))};
+  return {messages, hasReplies: originalMessages.length !== bubbles.length};
 }
 """
 # Прокручиваемый контейнер истории — ближайший предок сообщения с прокруткой.
@@ -300,14 +301,13 @@ class MaxChat:
         result = self.page.evaluate(_BUBBLES_JS)
         if result["hasReplies"] and not self._saw_replies:
             self._saw_replies = True
-            self.warnings.append("В MAX найдены ответы с цитатами. Имена авторов и процитированный текст пропущены. Текст самого ответа учитывается, если в нём указан класс.")
+            self.warnings.append("В MAX найдены ответы на сообщения. Они пропущены целиком.")
         return result["messages"]
 
     def _finish_lists(self, messages: list[str], need: set[str]) -> dict[str, str]:
         counts = Counter()
         complete = set()
-        for text in messages:
-            entries = parse_message(text)
+        for entries in message_lists(messages):
             counts.update({key for key, _, _ in entries if key in need})
             complete.update(key for key, _, full in entries if full)
         for key, count in sorted(counts.items()):
