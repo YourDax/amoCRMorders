@@ -27,6 +27,7 @@ _WORDS_RE = re.compile(r"\b(класс\w*|кл|группа|гр|group|спис�
 _KEY_RE = re.compile(r"^\d{1,2}[а-я]{0,2}$")
 _TIME_RE = re.compile(r"^\s*(ред\.?\s*)?\d{1,2}:\d{2}(\s*(изменено|ред\.?))?\s*$", re.I)
 _ITEM_NO_RE = re.compile(r"^\s*\d{1,3}\s*[.)\-–:]\s*\S")  # «10.Ли», «3) Иванов» — ребёнок, не класс
+_BARE_ITEM_RE = re.compile(r"^\s*\d{1,3}\s+(?=[А-ЯЁA-Z][а-яёa-z])")
 # «4в Сизинцева София», «3 «В»: Антонов» — класс в начале строки и текст после него
 _INLINE_RE = re.compile(
     r"^\s*(\d{1,2})\s*[-–]?\s*[«\"']?([А-Яа-яЁёA-Za-z]{1,2})[»\"']?"
@@ -58,7 +59,8 @@ def _counted_header_key(line: str) -> str:
 
 def _header_key(line: str) -> str:
     """Ключ класса, если строка целиком — заголовок («6Б», «Список 3А:»)."""
-    line = line.replace("\u200b", "").replace("\u00a0", " ")
+    line = line.replace("\u200b", "").replace("\u00a0", " ").lstrip()
+    line = line.removeprefix("·").lstrip()
     line = re.sub(r"^\s*(?:📋|список\s+(?:детей|учеников|участников)(?:\s+(?:для|на))?)\s*[:–—-]?\s*", "", line, flags=re.I)
     line = re.sub(r"[\s:,(–—-]*\d+\s*(?:чел(?:овек[аи]?)?\.?|дет(?:ей|и)|ученик(?:а|ов)?)\s*\)?[.:]?\s*$", "", line, flags=re.I)
     line = re.sub(r"\s*[:–—-]?\s*(?:список детей|на (?:фотосессию|съ[её]мку))\s*[:.]?$", "", line, flags=re.I)
@@ -74,6 +76,7 @@ def people(line: str) -> int:
         return 0
     marked = bool(re.match(r"^(?:\d+[.)\-:]|[•*–—-])", line))
     line = re.sub(r"^(?:\d+[.)\-:]|[•*–—-])\s*", "", line)
+    line = _BARE_ITEM_RE.sub("", line)
     line = re.sub(r"\s+\d{1,2}\s*[а-яёa-z]{1,2}$", "", line, flags=re.I)
     parts = re.split(r"[,;]|\s+и\s+", line)
     return sum(bool(re.fullmatch(r"[А-ЯЁA-Z][\w’'-]*(?:\s+[А-ЯЁA-Z][\w.’'-]*){0,3}[.]?", part.strip(), flags=re.I if marked else 0)) for part in parts)
@@ -96,6 +99,10 @@ def parse_message(text: str) -> list[tuple[str, str, bool]]:
     out = []
     key, body, evidence, full = "", [], 0, False
     for i, line in enumerate(lines):
+        if full and _BARE_ITEM_RE.match(line):
+            body.append(line)
+            evidence += people(line)
+            continue
         header = "" if re.match(r"^\d+\s*[.):]", line) else _header_key(line)
         header = header or _counted_header_key(line)
         inline = None if header else _inline(line)
@@ -122,7 +129,8 @@ def _joined_lists(messages):
         i += 1
         if _header_key(msg.strip()) and i < len(messages):
             following = messages[i].strip()
-            if _ITEM_NO_RE.match(following) or re.match(r"^[•*–—-]\s+", following):
+            if (_ITEM_NO_RE.match(following) or _BARE_ITEM_RE.match(following)
+                    or re.match(r"^[•*–—-]\s+", following)):
                 msg += "\n" + following
                 i += 1
         yield msg

@@ -104,6 +104,18 @@ class Messages(unittest.TestCase):
         self.assertEqual(parse_message(roster), [("1д", roster, True)])
         self.assertEqual(count_kids(collect_lists(["1д Старый Ребёнок", roster])["1д"]), 7)
 
+    def test_middle_dot_heading_and_numbers_without_punctuation(self):
+        heading = "· 1Д"
+        rows = "\n".join(
+            ["1 Ли Пётр"]
+            + [f"{i} Иванов Ребёнок" for i in range(2, 9)]
+            + ["9 Петров Георгий, Петров Давид (2Ж)"]
+        )
+        roster = f"{heading}\n{rows}"
+        self.assertEqual(parse_message(roster), [("1д", roster, True)])
+        self.assertEqual(collect_lists([heading, rows]), {"1д": roster})
+        self.assertEqual(count_kids(roster), 10)
+
     def test_time_and_header_only(self):
         self.assertEqual(find_lists("6Б\n12:40"), [])
         self.assertEqual(count_kids(find_lists("6Б\nИванов\nред. 10:17")[0][1]), 1)
