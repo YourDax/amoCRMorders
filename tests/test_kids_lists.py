@@ -116,6 +116,16 @@ class Messages(unittest.TestCase):
         self.assertEqual(collect_lists([heading, rows]), {"1д": roster})
         self.assertEqual(count_kids(roster), 10)
 
+    def test_rosters_with_siblings(self):
+        only_row = "8Б\n1. Иванов Михаил с братом Иванов Максим 5В"
+        several_rows = (
+            "3Г\n1. Петрова Арина\n2. Сидоров Валерий с сестрой Сидорова Вера 5В"
+            "\n3. Смирнова Надежда\n4. Орлов Максим"
+        )
+        self.assertEqual(collect_lists([only_row, several_rows]), {"8б": only_row, "3г": several_rows})
+        self.assertEqual(count_kids(only_row), 2)
+        self.assertEqual(count_kids(several_rows), 5)
+
     def test_time_and_header_only(self):
         self.assertEqual(find_lists("6Б\n12:40"), [])
         self.assertEqual(count_kids(find_lists("6Б\nИванов\nред. 10:17")[0][1]), 1)

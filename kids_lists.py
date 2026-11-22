@@ -78,7 +78,7 @@ def people(line: str) -> int:
     line = re.sub(r"^(?:\d+[.)\-:]|[•*–—-])\s*", "", line)
     line = _BARE_ITEM_RE.sub("", line)
     line = re.sub(r"\s+\d{1,2}\s*[а-яёa-z]{1,2}$", "", line, flags=re.I)
-    parts = re.split(r"[,;]|\s+и\s+", line)
+    parts = re.split(r"[,;]|\s+(?:и|с\s+(?:братом|сестрой))\s+", line, flags=re.I)
     return sum(bool(re.fullmatch(r"[А-ЯЁA-Z][\w’'-]*(?:\s+[А-ЯЁA-Z][\w.’'-]*){0,3}[.]?", part.strip(), flags=re.I if marked else 0)) for part in parts)
 
 
