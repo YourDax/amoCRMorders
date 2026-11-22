@@ -90,6 +90,12 @@ class Messages(unittest.TestCase):
     def test_two_classes_in_one_message(self):
         self.assertEqual([k for k, _ in find_lists("1б\n1.Ли\n2.Ким\n2а\n1.Петров")], ["1б", "2а"])
 
+    def test_class_header_with_count(self):
+        msg = "2к, 3 чел:\nПервый Ребёнок\nВторой Ребёнок (невидимки)\nТретий Ребёнок"
+        self.assertEqual(parse_message(msg), [("2к", msg, True)])
+        self.assertEqual(count_kids(msg), 3)
+        self.assertEqual(collect_lists([msg, "Третий Ребёнок добавился"]), {"2к": msg})
+
     def test_time_and_header_only(self):
         self.assertEqual(find_lists("6Б\n12:40"), [])
         self.assertEqual(count_kids(find_lists("6Б\nИванов\nред. 10:17")[0][1]), 1)
@@ -126,10 +132,13 @@ class MaxChatReading(unittest.TestCase):
         chat.open_chat = Mock()
         chat.page = Mock()
         chat.page.evaluate.side_effect = {
-            _BUBBLES_JS: ["6 Ж\u200b\n1. Пример Ребёнок"],
+            _BUBBLES_JS: {"messages": ["6 Ж\u200b\n1. Пример Ребёнок", "6ж Другой Ребёнок"], "hasReplies": True},
             _SCROLLER_JS: False,
         }.__getitem__
-        self.assertIn("6ж", chat.read_lists("Чат", {"6ж"}))
+        self.assertEqual(chat.read_lists("Чат", {"6ж"})["6ж"], "6 Ж\u200b\n1. Пример Ребёнок\n6ж Другой Ребёнок")
+        self.assertTrue(any("ответы с цитатами" in warning for warning in chat.warnings))
+        self.assertTrue(any("6ж: найдено несколько сообщений (2)" in warning for warning in chat.warnings))
+
 
 
 if __name__ == "__main__":

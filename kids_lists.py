@@ -45,9 +45,12 @@ def class_key(text: str) -> str:
     return s if _KEY_RE.match(s) else ""
 
 
+_HEADER_COUNT_RE = re.compile(r"\s*[,;–—-]?\s+\d{1,3}\s*(?:чел(?:овек)?\.?|детей|реб[её]нка)\s*[:.]?$", re.I)
+
+
 def _header_key(line: str) -> str:
     """Ключ класса, если строка целиком — заголовок («6Б», «Список 3А:»)."""
-    line = line.strip()
+    line = _HEADER_COUNT_RE.sub("", _INVISIBLE_RE.sub("", line).strip())
     if not line or len(line) > 25:
         return ""
     return class_key(line)
@@ -137,11 +140,11 @@ def count_kids(body: str) -> int:
     for i, line in enumerate(lines):
         if _TIME_RE.fullmatch(line) or _COUNT_COMMENT_RE.match(line):
             continue
+        if _header_key(line) and (i == 0 or not _ITEM_NO_RE.match(line)):
+            continue
         inline = _INLINE_RE.match(line)
         if inline:
             line = inline.group(3)
-        elif _header_key(line) and (i == 0 or not _ITEM_NO_RE.match(line)):
-            continue
         else:
             line = _LIST_PREFIX_RE.sub("", line)
         line = re.sub(r"\([^)]*\)", "", line).strip()

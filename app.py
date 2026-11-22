@@ -61,6 +61,7 @@ class State:
         self.stop_flag = False
         self.continue_evt = threading.Event()
         self.total = self.done_n = self.failed_n = self.notes_n = 0
+        self.max_warnings: list[str] = []
         self.pipelines: list[str] = list(CONFIG.get("pipelines", []))
 
     def add_log(self, msg: str):
@@ -199,14 +200,22 @@ def read_kids_lists(bot, chat: str, items: list[dict]) -> dict[str, str] | None:
         return None
     S.add_log(f"Списки детей: читаю чат MAX «{chat}» (классов: {len(need)})…")
     mx = MaxChat(bot.ctx, log=S.add_log, should_stop=lambda: S.stop_flag)
+    failure = None
     try:
         lists = mx.read_lists(chat, need)
     except Exception as e:  # noqa: BLE001
         if is_closed_error(e) or "Остановлено пользователем" in str(e):
             raise
-        S.add_log(f"   ⚠ MAX: {str(e).splitlines()[0][:300]}")
+        failure = f"Не удалось прочитать MAX: {str(e).splitlines()[0][:300]}"
         return None
     finally:
+        warnings = [*mx.warnings]
+        if failure:
+            warnings.append(failure)
+        with S.lock:
+            S.max_warnings = warnings
+        for warning in warnings:
+            S.add_log(f"   ⚠ MAX: {warning}")
         try:
             bot.page.bring_to_front()
         except Exception:  # noqa: BLE001
@@ -251,6 +260,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
     S.running = True
     with S.lock:
         S.total, S.done_n, S.failed_n, S.notes_n = len(items), 0, 0, 0
+        S.max_warnings = []
     lists = None
     if max_chat:
         todo = [it for it in items if not progress.get(history.progress_key(it), {}).get("note")]
@@ -488,6 +498,7 @@ def api_parse():
             return jsonify(error="Дождитесь окончания работы"), 409
         S.rows = {}
         S.total = S.done_n = S.failed_n = S.notes_n = 0
+        S.max_warnings = []
     school = deals[0].school if deals else ""
     kind = kind or "school"
     for d in out:
@@ -590,6 +601,7 @@ def api_history_open(hid):
     with S.lock:
         S.rows = {}
         S.total = S.done_n = S.failed_n = S.notes_n = 0
+        S.max_warnings = []
     return jsonify(entry=e)
 
 
@@ -621,7 +633,7 @@ def api_status():
         return jsonify(log=S.log[-200:], rows=S.rows, running=S.running, waiting=S.waiting,
                        loggedIn=S.logged_in, phase=S.phase, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
                        pipelines=S.pipelines, total=S.total, doneN=S.done_n, failedN=S.failed_n,
-                       notesN=S.notes_n, browser=S.browser_choice)
+                       notesN=S.notes_n, browser=S.browser_choice, maxWarnings=S.max_warnings)
 
 
 def open_ui(url: str) -> bool:

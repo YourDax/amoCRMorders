@@ -361,7 +361,7 @@ async function upload(f){
 
 // показать таблицу: только что загруженную или из «Истории»
 function showTable(e){
-  S.rows = {}; S.total = 0;
+  S.rows = {}; S.total = 0; S.maxWarnings = [];
   const strip = list => clone(list || []).map(d => { delete d._final; return d; });
   histId = e.id || null; curFile = e.file || ""; curWarnings = e.warnings || [];
   original = strip(e.original); deals = strip(e.deals); school = e.school || ""; prefix = e.prefix || "";
@@ -514,11 +514,12 @@ $("#btnClear").onclick = () => {
 };
 
 function renderCountWarnings(){
-  const warnings = deals.filter(d => d.countWarning);
+  const counts = deals.filter(d => d.countWarning).map(d => `${d.name} — ${d.countWarning}`);
+  const warnings = deals.length ? [...(S.maxWarnings || []), ...counts] : [];
   const box = $("#maxCountWarning");
   const html = warnings.length
-    ? `<div class="warn max-count-warning"><strong>Расхождения по количеству детей в MAX</strong>
-         <ul>${warnings.map(d => `<li>${esc(d.name)} — ${esc(d.countWarning)}</li>`).join("")}</ul></div>`
+    ? `<div class="warn max-count-warning"><strong>Предупреждения MAX</strong>
+         <ul>${warnings.map(warning => `<li>${esc(warning)}</li>`).join("")}</ul></div>`
     : "";
   if(box.innerHTML !== html) box.innerHTML = html;
 }
