@@ -29,7 +29,7 @@ _TIME_RE = re.compile(r"^\s*(ред\.?\s*)?\d{1,2}:\d{2}(\s*(изменено|р
 _ITEM_NO_RE = re.compile(r"^\s*\d{1,3}\s*[.)\-–:]\s*\S")  # «10.Ли», «3) Иванов» — ребёнок, не класс
 # «4в Сизинцева София», «3 «В»: Антонов» — класс в начале строки и текст после него
 _INLINE_RE = re.compile(
-    r"^\s*(\d{1,2})\s*[-–]?\s*[«\"']?([А-Яа-яЁёA-Za-z])[»\"']?"
+    r"^\s*(\d{1,2})\s*[-–]?\s*[«\"']?([А-Яа-яЁёA-Za-z]{1,2})[»\"']?"
     r"(?:\s*(?:класс\w*|кл\.?))?(?=[\s,:;.\-–])[\s,:;.\-–]+(\S.*)$", re.I)
 
 
@@ -44,51 +44,78 @@ def class_key(text: str) -> str:
 
 def _header_key(line: str) -> str:
     """Ключ класса, если строка целиком — заголовок («6Б», «Список 3А:»)."""
-    line = line.strip()
-    if not line or len(line) > 25:
-        return ""
+    line = line.replace("\u200b", "").replace("\u00a0", " ")
+    line = re.sub(r"^\s*(?:📋|список\s+(?:детей|учеников|участников)(?:\s+(?:для|на))?)\s*[:–—-]?\s*", "", line, flags=re.I)
+    line = re.sub(r"[\s:,(–—-]*\d+\s*(?:чел(?:овек[аи]?)?\.?|дет(?:ей|и)|ученик(?:а|ов)?)\s*\)?[.:]?\s*$", "", line, flags=re.I)
+    line = re.sub(r"\s*[:–—-]?\s*(?:список детей|на (?:фотосессию|съ[её]мку))\s*[:.]?$", "", line, flags=re.I)
     return class_key(line)
 
 
-def _inline_key(line: str) -> str:
-    m = _INLINE_RE.match(line)
-    return class_key(m.group(1) + m.group(2)) if m else ""
+def people(line: str) -> int:
+    """Число похожих на имена записей, без пояснений и отсутствующих."""
+    line = re.sub(r"\([^)]*\)", "", line).strip()
+    if re.search(r"\?|(?:^|\s)(?:нет|не будет|не будут|отсутству\w*|не прид[её]т)(?:\s|$|[.,:])", line, re.I):
+        return 0
+    if re.match(r"^(?:спасибо|здравствуйте|добрый|завтра|сегодня|готово|понятно|вопрос|итого|всего|сбор|список|привет|хорошо)\b", line, re.I):
+        return 0
+    marked = bool(re.match(r"^(?:\d+[.)\-:]|[•*–—-])", line))
+    line = re.sub(r"^(?:\d+[.)\-:]|[•*–—-])\s*", "", line)
+    parts = re.split(r"[,;]|\s+и\s+", line)
+    return sum(bool(re.fullmatch(r"[А-ЯЁA-Z][\w’'-]*(?:\s+[А-ЯЁA-Z][\w.’'-]*){0,3}[.]?", part.strip(), flags=re.I if marked else 0)) for part in parts)
+
+
+def _inline(line):
+    match = _INLINE_RE.match(line)
+    if match:
+        return class_key(match[1] + match[2]), match[3]
+    split = re.match(r"^(.+?)\s*[:—–]\s*(\S.*)$", line)
+    if split and not _ITEM_NO_RE.match(line):
+        key = _header_key(split[1])
+        if key:
+            return key, split[2]
+    return None
 
 
 def parse_message(text: str) -> list[tuple[str, str, bool]]:
-    """Списки в одном сообщении: [(ключ класса, текст, полный ли список), ...]."""
-    lines = [ln.rstrip() for ln in text.replace("\r", "").split("\n")]
-    lines = [ln for ln in lines if ln.strip() and not _TIME_RE.match(ln)]
-    out: list[tuple[str, str, bool]] = []
-    key, head, body = "", "", []
-
-    def flush():
-        if key and body:
-            out.append((key, "\n".join([head, *body]), True))
-
-    for ln in lines:
-        s = ln.strip()
-        k = "" if (key and _ITEM_NO_RE.match(s)) else _header_key(s)
-        if k:
-            flush()
-            key, head, body = k, s, []
+    lines = [s.strip() for s in text.splitlines() if s.strip() and not _TIME_RE.match(s)]
+    out = []
+    key, body, evidence, full = "", [], 0, False
+    for i, line in enumerate(lines):
+        header = "" if re.match(r"^\d+\s*[.):]", line) else _header_key(line)
+        inline = None if header else _inline(line)
+        inline_key = inline[0] if inline else ""
+        if header or inline_key:
+            if key and evidence:
+                out.append((key, "\n".join(body), full))
+            key, full = header or inline_key, bool(header)
+            body = lines[:2] if inline_key and i == 1 and not out and not body else [line]
+            evidence = people(inline[1]) if inline_key else 0
         elif key:
-            body.append(s)
-    flush()
-    if out:
-        return out
-    # короткая запись: класс в начале одной из первых строк (первой может быть имя отправителя)
-    for s in [ln.strip() for ln in lines[:2]]:
-        k = _inline_key(s)
-        if k:
-            return [(k, "\n".join(ln.strip() for ln in lines), False)]
-    return []
+            body.append(line)
+            evidence += people(line)
+    if key and evidence:
+        out.append((key, "\n".join(body), full))
+    return out
+
+
+def _joined_lists(messages):
+    """Отдельно отправленный заголовок и непосредственно следующий нумерованный список."""
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        i += 1
+        if _header_key(msg.strip()) and i < len(messages):
+            following = messages[i].strip()
+            if _ITEM_NO_RE.match(following) or re.match(r"^[•*–—-]\s+", following):
+                msg += "\n" + following
+                i += 1
+        yield msg
 
 
 def collect_lists(messages: list[str]) -> dict[str, str]:
     """Списки по классам из сообщений чата (от старых к новым)."""
     parts: dict[str, list[str]] = {}
-    for msg in messages:
+    for msg in _joined_lists(messages):
         for key, body, full in parse_message(msg):
             if full:
                 parts[key] = [body]
@@ -99,7 +126,7 @@ def collect_lists(messages: list[str]) -> dict[str, str]:
 
 def full_list_keys(messages: list[str]) -> set[str]:
     """Классы, у которых в этих сообщениях есть полный список (дальше в прошлое искать не нужно)."""
-    return {key for msg in messages for key, _, full in parse_message(msg) if full}
+    return {key for msg in _joined_lists(messages) for key, _, full in parse_message(msg) if full}
 
 
 def find_lists(text: str) -> list[tuple[str, str]]:
@@ -121,4 +148,14 @@ def merge_history(history: list[str], older: list[str]) -> list[str]:
 
 
 def count_kids(body: str) -> int:
-    return max(0, len(body.split("\n")) - 1)
+    total = 0
+    for _, block, full in parse_message(body):
+        started = full
+        for i, line in enumerate(block.splitlines()):
+            inline = _inline(line)
+            if not full and inline and not started:
+                total += people(inline[1])
+                started = True
+            elif started and i:
+                total += people(line)
+    return total

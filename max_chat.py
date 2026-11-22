@@ -52,7 +52,7 @@ _RESULTS_JS = """
 """
 # Тексты сообщений на экране по порядку (сверху вниз = от старых к новым), без времени.
 _BUBBLES_JS = """
-() => [...document.querySelectorAll('.bubble')].map((b) => {
+() => [...document.querySelectorAll('[data-kids-scroller] .bubble')].filter(b => b.getClientRects().length).map((b) => {
   const texts = [...b.querySelectorAll('.text')].filter((t) => !t.closest('.meta'));
   return (texts.length ? texts.map((t) => t.innerText).join('\\n') : (b.innerText || '')).trim();
 }).filter(Boolean)
@@ -64,13 +64,14 @@ _SCROLLER_JS = """
   let el = b && b.parentElement;
   while (el && el !== document.body) {
     const st = getComputedStyle(el);
-    if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 10) {
+    if (/(auto|scroll)/.test(st.overflowY)) {
       el.setAttribute('data-kids-scroller', '1');
       return true;
     }
     el = el.parentElement;
   }
-  return false;
+  if (b) document.body.setAttribute('data-kids-scroller', '1');
+  return !!b;
 }
 """
 _SCROLL_UP_JS = """
@@ -222,8 +223,10 @@ class MaxChat:
         self.page.locator(".searchResultsList > *").nth(found[idx][0]).click()
         for _ in range(20):
             self._sleep(250)
-            if self._header_title():
+            if norm_title(self._header_title()) == norm_title(found[idx][1]):
                 break
+        else:
+            raise RuntimeError("MAX не подтвердил открытие выбранного чата")
         self.log(f"MAX: открыт чат «{self._header_title() or found[idx][1]}»")
 
     def read_lists(self, chat: str, need: set[str]) -> dict[str, str]:
@@ -249,7 +252,7 @@ class MaxChat:
             self._check_stop()
             before = len(history)
             history = merge_history(history, self.page.evaluate(_BUBBLES_JS))
-            full |= full_list_keys(history[:len(history) - before])
+            full |= full_list_keys(history[:len(history) - before + 1])
             # полный список найден — более старые сообщения его уже не изменят
             if need and need <= full:
                 break

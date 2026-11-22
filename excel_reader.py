@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 import openpyxl
 
+from kids_lists import class_key
 from excel_colors import cell_is_red, theme_palette
 
 HEADER_ALIASES = {
@@ -38,6 +39,43 @@ def deal_name(klass: str, place: str, kind: str) -> str:
     if kind == KINDERGARTEN:
         klass = "гр." + re.sub(r"^гр(уппа)?\.?\s*", "", klass, flags=re.I)
     return f"{klass} {place}".strip()
+
+
+def deal_identity(name: str) -> str:
+    words = name.casefold().replace("ё", "е").split()
+    for i in range(len(words)):
+        for end in range(min(i + 3, len(words)), i, -1):
+            candidate = " ".join(words[i:end])
+            key = class_key(candidate)
+            if end > i + 1 and class_key(words[i]) and not words[i].isdigit():
+                continue
+            if key and not (end > i + 1 and words[end-1].isdigit() and not words[i].startswith("гр")):
+                words[i:end] = [key]
+                return " ".join(words)
+    return " ".join(words)
+
+
+def progress_key(progress, name, pipeline):
+    import json
+    identity = deal_identity(name)
+    key = json.dumps([pipeline.strip().casefold(), identity], ensure_ascii=False)
+    if key in progress:
+        return key
+    if not pipeline:
+        # CLI без явной воронки сохраняет совместимость со старыми карточками.
+        for saved in progress:
+            if saved.startswith("["):
+                try:
+                    _, other = json.loads(saved)
+                except (TypeError, ValueError):
+                    continue
+                if other == identity:
+                    return saved
+    # Старый формат не хранил воронку. Сохраняем защиту старых карточек.
+    for old in progress:
+        if not old.startswith("[") and deal_identity(old) == identity:
+            return old
+    return key if pipeline else name
 
 
 def fix_name_case(name: str) -> str:
@@ -83,7 +121,7 @@ class Deal:
     @property
     def refused(self) -> bool:
         """Похоже ли на отказ класса — такие строки по умолчанию не отмечены."""
-        return bool(REFUSAL_RE.search(self.info))
+        return bool(REFUSAL_RE.search(re.sub(r"\b(?:без\s+отказ\w*|отказ\w*\s+нет|не\s+отказ\w*)\b", "", self.info, flags=re.I)))
 
     @property
     def name(self) -> str:
@@ -120,7 +158,7 @@ def normalize_phone(raw) -> tuple[str, str]:
 
     numbers = []
     rest = text
-    for m in re.finditer(r"\+?\d[\d\s\-()]{8,}\d", text):
+    for m in re.finditer(r"(?<!\d)(?:\+?[78][\s()-]*)?(?:\d[\s()-]*){9}\d(?!\d)", text):
         digits = re.sub(r"\D", "", m.group())
         if len(digits) == 11 and digits[0] in "78":
             numbers.append("+7" + digits[1:])
@@ -223,13 +261,11 @@ def read_deals(path: str, sheets: list[str] | None = None, school_override: str 
                kind: str | None = None) -> tuple[list[Deal], list[str]]:
     """Читает книгу. kind — school / kindergarten (None — определить по файлу).
     Возвращает (сделки, предупреждения)."""
-    kind = kind or detect_kind(path)
-    lead = LEAD_ROLE[kind]
+    forced_kind = kind
     wb = openpyxl.load_workbook(path, data_only=True)
     palette = theme_palette(wb)
     deals: list[Deal] = []
     warnings: list[str] = []
-    place_word = "детский сад (ячейка «ДС: ...»)" if kind == KINDERGARTEN else "школа (ячейка «Школа: ...»)"
 
     per_sheet: list[tuple[str, list[Deal], list[str]]] = []  # (лист, сделки, предупреждения по строкам)
     for ws in wb.worksheets:
@@ -243,7 +279,11 @@ def read_deals(path: str, sheets: list[str] | None = None, school_override: str 
             warnings.append(f"Лист «{ws.title}»: не найдена строка заголовков, пропущен")
             continue
         header_row, cols = header
-        school = school_override or _find_place(ws)[0]
+        place, label_kind = _find_place(ws)
+        school = school_override or place
+        kind = forced_kind or label_kind or _kind_by_headers(ws, header_row) or SCHOOL
+        lead = LEAD_ROLE[kind]
+        place_word = "название учреждения"
 
         def get(r, key):
             col = cols.get(key)
@@ -282,9 +322,28 @@ def read_deals(path: str, sheets: list[str] | None = None, school_override: str 
         deals.extend(sheet_deals)
         warnings.extend(sheet_warns)
 
-    seen: dict[str, Deal] = {}
+    seen = {}
     for d in deals:
-        if d.name in seen:
-            warnings.append(f"«{d.name}» встречается дважды (листы «{seen[d.name].sheet}» и «{d.sheet}»)")
-        seen.setdefault(d.name, d)
-    return deals, warnings
+        key = (d.kind, d.school.casefold(), class_key(d.klass) or d.klass.casefold())
+        if key in seen:
+            first = seen[key]
+            warnings.append(f"Повтор «{d.name}» на листе «{d.sheet}», строка {d.row}. Объединён со строкой {first.row} листа «{first.sheet}».")
+            for contact in d.contacts:
+                prior = next((c for c in first.contacts if c.role == contact.role), None)
+                if prior is None:
+                    first.contacts.append(contact)
+                elif prior.name and contact.name and prior.name != contact.name:
+                    warnings.append(f"«{d.name}»: разные контакты {contact.role}; сохранён контакт из строки {first.row} листа «{first.sheet}».")
+                else:
+                    if prior.phone and contact.phone and prior.phone != contact.phone:
+                        warnings.append(f"«{d.name}»: разные телефоны {contact.role}; сохранён первый.")
+                    prior.name = prior.name or contact.name
+                    prior.phone = prior.phone or contact.phone
+                    prior.note = "; ".join(dict.fromkeys(filter(None, [prior.note, contact.note])))
+            first.red |= d.red
+            if d.info and d.info != first.info:
+                first.info = "; ".join(filter(None, [first.info, d.info]))
+        else:
+            seen[key] = d
+    wb.close()
+    return list(seen.values()), warnings

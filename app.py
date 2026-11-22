@@ -28,7 +28,7 @@ if sys.stdout is None or sys.stderr is None:
 
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
-from excel_reader import Contact, Deal, fix_name_case, read_deals  # noqa: E402
+from excel_reader import Contact, Deal, progress_key, fix_name_case, read_deals  # noqa: E402
 from kids_lists import class_key, count_kids  # noqa: E402
 
 CONFIG = paths.load_config()
@@ -90,10 +90,27 @@ def load_progress() -> dict:
 
 
 def save_progress(p: dict):
-    PROGRESS.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=PROGRESS.parent, delete=False) as tmp:
+        json.dump(p, tmp, ensure_ascii=False, indent=2)
+    os.replace(tmp.name, PROGRESS)
 
 
 # ---------------- фоновый поток с браузером ----------------
+def migrate_progress(bot):
+    progress = load_progress()
+    legacy = {key: value for key, value in progress.items() if not key.startswith("[")}
+    names = bot.stored_pipeline_names([v.get("url") for v in legacy.values()])
+    for key, value in legacy.items():
+        pipeline = names.get(value.get("url"))
+        if pipeline:
+            target = progress_key({}, key, pipeline)
+            if target not in progress or progress[target].get("url") == value.get("url"):
+                progress.setdefault(target, value)
+                del progress[key]
+    if len(legacy) != sum(not key.startswith("[") for key in progress):
+        save_progress(progress)
+
+
 def worker():
     """Все вызовы Playwright — только в этом потоке."""
     from amo_bot import AmoBot, BrowserClosed, is_closed_error
@@ -139,6 +156,7 @@ def worker():
         bot.ensure_logged_in(wait_minutes=10, cancelled=lambda: S.relogin)
         S.logged_in = True
         try:
+            migrate_progress(bot)
             found = bot.list_pipelines()
             if found:
                 S.pipelines = found
@@ -235,13 +253,14 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
     progress = load_progress()
     S.stop_flag = False
     S.running = True
+    S.row_pipeline = pipeline
     with S.lock:
         S.total, S.done_n, S.failed_n = len(items), 0, 0
     lists = None
     if max_chat:
-        todo = [it for it in items if not progress.get(it["name"].strip(), {}).get("note")]
+        todo = [it for it in items if not progress.get(progress_key(progress, it["name"], pipeline), {}).get("note")]
         if notes_only:
-            todo = [it for it in todo if progress.get(it["name"].strip(), {}).get("status") == "ok"]
+            todo = [it for it in todo if progress.get(progress_key(progress, it["name"], pipeline), {}).get("status") == "ok"]
         if todo:
             lists = read_kids_lists(bot, max_chat, todo)
     errors_in_row = 0
@@ -253,7 +272,13 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
         name = it["name"].strip()
         contacts = [Contact(role=c["role"], name=fix_name_case(c["name"].strip()), phone=c["phone"].strip())
                     for c in it["contacts"] if c["name"].strip() or c["phone"].strip()]
-        prev = progress.get(name, {})
+        record = progress_key(progress, name, pipeline)
+        prev = progress.get(record, {})
+        if prev.get("status") == "uncertain":
+            S.set_row(rid, status="error", error="Проверьте результат сохранения в amoCRM перед повтором")
+            with S.lock:
+                S.failed_n += 1
+            continue
         if notes_only and prev.get("status") != "ok":
             S.set_row(rid, status="error", error="Сделка ещё не создана — сначала «Создать»")
             with S.lock:
@@ -261,11 +286,13 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
             continue
         if prev.get("status") == "ok":
             S.set_row(rid, status="skip", url=prev.get("url"), note="ok" if prev.get("note") else None)
-            if lists is not None and not prev.get("note") and prev.get("url"):
+            if lists is not None and not record.startswith("["):
+                S.add_log("Воронка старой карточки не подтверждена. Проверьте ссылку в истории.")
+            elif lists is not None and not prev.get("note") and prev.get("url"):
                 S.add_log(f"[{n}/{len(items)}] «{name}» — уже создана, добавляю список детей")
                 try:
                     bot.open_deal(prev["url"])
-                    add_kids_note(bot, it, lists, progress, name)
+                    add_kids_note(bot, it, lists, progress, record)
                 except Exception as e:  # noqa: BLE001
                     if is_closed_error(e) or bot.closed:
                         S.logged_in = False
@@ -300,16 +327,20 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                 break
             except Exception as e:  # noqa: BLE001
                 last_err = e
+                if getattr(e, "uncertain_save", False):
+                    progress[record] = {"status": "uncertain", "url": state["url"]}
+                    save_progress(progress)
+                    break
                 if "Остановлено пользователем" in str(e):
                     if state["url"]:  # сделка уже сохранена частично — запомнить для дозаполнения
-                        progress[name] = {"url": state["url"], "status": "partial",
+                        progress[record] = {"url": state["url"], "status": "partial",
                                           "contacts_done": state["contacts_done"], "at": time.strftime("%Y-%m-%d %H:%M")}
                         save_progress(progress)
                     break
                 if is_closed_error(e) or bot.closed:  # окно amoCRM закрыли — повторять бессмысленно
                     last_err = BrowserClosed()
                     if state["url"]:
-                        progress[name] = {"url": state["url"], "status": "partial",
+                        progress[record] = {"url": state["url"], "status": "partial",
                                           "contacts_done": state["contacts_done"], "at": time.strftime("%Y-%m-%d %H:%M")}
                         save_progress(progress)
                     break
@@ -317,11 +348,11 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                 msg = str(e).splitlines()[0][:300]
                 S.add_log(f"   ⚠ попытка {attempt}: {msg} (скриншот: {shot.name})")
                 if state["url"]:
-                    progress[name] = {"url": state["url"], "status": "partial",
+                    progress[record] = {"url": state["url"], "status": "partial",
                                       "contacts_done": state["contacts_done"], "at": time.strftime("%Y-%m-%d %H:%M")}
                     save_progress(progress)
         if created:  # сделка дозаполнена до конца — засчитываем, даже если в этот момент нажали «Стоп»
-            progress[name] = {"url": state["url"], "status": "ok", "at": time.strftime("%Y-%m-%d %H:%M")}
+            progress[record] = {"url": state["url"], "status": "ok", "at": time.strftime("%Y-%m-%d %H:%M")}
             save_progress(progress)
             S.set_row(rid, status="ok", url=state["url"])
             S.add_log(f"   ✅ создана")
@@ -330,7 +361,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                 S.done_n += 1
             if not S.stop_flag:
                 try:  # сделка уже создана: без примечания её можно дополнить позже кнопкой «Списки детей»
-                    add_kids_note(bot, it, lists, progress, name)
+                    add_kids_note(bot, it, lists, progress, record)
                 except Exception as e:  # noqa: BLE001
                     if is_closed_error(e) or bot.closed:
                         S.logged_in = False
@@ -338,8 +369,10 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                         break
             continue
         err = "Остановлено" if S.stop_flag else str(last_err).splitlines()[0][:300]
-        S.set_row(rid, status="partial" if state["url"] else "error", error=err, url=state["url"])
-        if state["url"]:
+        S.set_row(rid, status="uncertain" if getattr(last_err, "uncertain_save", False) else ("partial" if state["url"] else "error"), error=err, url=state["url"])
+        if getattr(last_err, "uncertain_save", False):
+            S.add_log("Проверьте результат в amoCRM. Автоповтор отключён.")
+        elif state["url"]:
             S.add_log("   Сделка сохранена не полностью — можно нажать «Повторить ошибочные», бот дозаполнит её.")
         with S.lock:
             S.failed_n += 1
@@ -358,6 +391,16 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
     S.add_log(f"Готово: {'обработано' if notes_only else 'создано'} {S.done_n}, с ошибками {S.failed_n}.")
 
 
+def save_contact(bot, state):
+    try:
+        bot.save()
+    except Exception as exc:
+        if not bot.closed and "/leads/detail/" in bot.page.url and not state["url"]:
+            state["url"] = bot.deal_url()
+        exc.uncertain_save = "Остановлено пользователем" not in str(exc)
+        raise
+
+
 def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, state: dict):
     """Создаёт сделку или дозаполняет уже сохранённую (state['url'], state['contacts_done'])."""
     if state["url"]:
@@ -374,7 +417,7 @@ def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, sta
             state["just_created"] = False
         bot.fill_contact(c, company=name)  # «Название компании» = класс + школа
         bot._pause(f"«{name}»: заполнен {c.role} ({c.name}). Проверьте форму и нажмите «Продолжить» — будет «Сохранить»")
-        bot.save()
+        save_contact(bot, state)
         if not state["url"]:
             if "/leads/detail/" not in bot.page.url:
                 raise RuntimeError("После «Сохранить» сделка не создалась")
@@ -383,7 +426,7 @@ def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, sta
         state["contacts_done"] += 1
     if not state["url"]:  # сделка без контактов
         bot._pause(f"«{name}»: контактов нет. «Продолжить» — сохранить")
-        bot.save()
+        save_contact(bot, state)
         state["url"] = bot.deal_url()
 
 
@@ -415,9 +458,9 @@ def api_parse():
     for i, d in enumerate(deals):
         kr = next((c for c in d.contacts if c.role in ("КР", "ВС")), None)
         rk = next((c for c in d.contacts if c.role == "РК"), None)
-        done = progress.get(d.name)
+        done = progress.get(progress_key(progress, d.name, request.form.get("pipeline", "")))
         out.append({
-            "id": f"r{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass,
+            "id": f"r{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass, "kind": d.kind, "school": d.school,
             "kr": {"name": kr.name if kr else "", "phone": kr.phone_field if kr else ""},
             "rk": {"name": rk.name if rk else "", "phone": rk.phone_field if rk else ""},
             "info": d.info, "refused": d.refused, "red": d.red,
@@ -487,11 +530,18 @@ def api_stop():
     return jsonify(ok=True)
 
 
+@app.post("/api/progress")
+def api_progress():
+    data = request.get_json()
+    progress = load_progress()
+    return jsonify([progress.get(progress_key(progress, name, data["pipeline"]), {}) for name in data["names"]])
+
+
 @app.post("/api/forget")
 def api_forget():
     name = request.get_json(force=True).get("name", "")
     p = load_progress()
-    if p.pop(name, None) is not None:
+    if p.pop(progress_key(p, name, request.json.get("pipeline", "")), None) is not None:
         save_progress(p)
     return jsonify(ok=True)
 
@@ -503,7 +553,7 @@ def api_status():
     with S.lock:
         return jsonify(log=S.log[-200:], rows=S.rows, running=S.running, waiting=S.waiting,
                        loggedIn=S.logged_in, phase=S.phase, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
-                       pipelines=S.pipelines, total=S.total, doneN=S.done_n, failedN=S.failed_n)
+                       pipelines=S.pipelines, rowPipeline=getattr(S, "row_pipeline", ""), total=S.total, doneN=S.done_n, failedN=S.failed_n)
 
 
 def open_ui(url: str) -> bool:

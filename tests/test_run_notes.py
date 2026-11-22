@@ -82,8 +82,8 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(app.S.rows["r1"]["note"], "ok")
         self.assertEqual(app.S.rows["r3"]["note"], "none")
         p = app.load_progress()
-        self.assertTrue(p["5 Б Щ_10"]["note"])
-        self.assertNotIn("note", p["7а Щ_10"])
+        self.assertTrue(p[app.progress_key(p,"5 Б Щ_10","P")]["note"])
+        self.assertNotIn("note", p[app.progress_key(p,"7а Щ_10","P")])
 
         # повторный запуск: сделки не создаются, MAX читается только для 7а (у других список уже есть)
         bot2 = FakeBot()

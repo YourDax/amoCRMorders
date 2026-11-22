@@ -261,7 +261,7 @@ function autoName(klass, place, k, pre = ""){
 const fixNameCase = s => s.split(/(\s+)/).map(w => w.split("-").map(p => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()).join("-")).join("");
 let S = {rows:{}, running:false, log:[]};
 const byId = id => deals.find(x => x.id === id);
-const isDone = d => d.done && d.doneStatus !== "partial";
+const isDone = d => d.doneStatus === "uncertain" || (d.done && d.doneStatus !== "partial");
 
 async function post(url, body){
   const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body||{})});
@@ -315,12 +315,12 @@ document.addEventListener("drop", e => { e.preventDefault(); if(e.dataTransfer.f
 async function upload(f){
   if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
   if(!/\.xlsx$/i.test(f.name)){ alert("Нужен файл .xlsx"); return; }
-  const fd = new FormData(); fd.append("file", f);
+  const fd = new FormData(); fd.append("file", f); fd.append("pipeline", $("#pipeline").value);
   const r = await fetch("/api/parse", {method:"POST", body: fd});
   const j = await r.json();
   fileInp.value = "";
   if(!r.ok){ alert(j.error); return; }
-  j.deals.forEach(d => d.sel = !isDone(d) && !d.refused && !d.red);
+  j.deals.forEach(d => d.sel = !isDone(d) && !d.red);
   original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
   prefix = ""; fileSchool = school; kind = fileKind = j.kind === "kindergarten" ? "kindergarten" : "school";
   document.body.classList.add("loaded");
@@ -337,7 +337,7 @@ async function upload(f){
     <span><span id="unitsLbl"></span>: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
     ${red ? `<span>Красные в файле: <b>${red}</b> (не отмечены)</span>` : ""}
-    ${refused ? `<span>Похоже на отказ: <b>${refused}</b> (не отмечены)</span>` : ""}`;
+    ${refused ? `<span>Похоже на отказ: <b>${refused}</b></span>` : ""}`;
   $("#school").onchange = e => rename(e.target.value.trim(), kind, prefix);
   $("#prefix").onchange = e => rename(school, kind, e.target.value.trim());
   document.querySelectorAll(".seg [data-kind]").forEach(b => b.onclick = () => rename(school, b.dataset.kind, prefix));
@@ -351,10 +351,13 @@ async function upload(f){
 function rename(newSchool, newKind, newPrefix){
   if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); applyKindUI(); if($("#prefix")) $("#prefix").value = prefix; return; }
   for(const d of deals){
-    if(d.name === autoName(d.klass, school, kind, prefix)) d.name = autoName(d.klass, newSchool, newKind, newPrefix);
+    const place = newSchool === school ? d.school : newSchool;
+    const type = newKind === kind ? d.kind : newKind;
+    if(d.name === autoName(d.klass, d.school, d.kind, prefix)) d.name = autoName(d.klass, place, type, newPrefix);
+    d.school = place; d.kind = type;
   }
   school = newSchool; kind = newKind; prefix = newPrefix;
-  applyKindUI(); renderRows();
+  applyKindUI(); renderRows(); refreshProgress();
 }
 function applyKindUI(){
   const K = KIND[kind];
@@ -409,6 +412,7 @@ $("#rows").addEventListener("input", e => {
 });
 $("#rows").addEventListener("change", e => {
   const f = e.target.dataset.f;
+  if(f === "name") refreshProgress();
   if(f === "kr.name" || f === "rk.name"){  // ФИО — с заглавных букв
     const d = byId(e.target.closest("tr").dataset.id), fixed = fixNameCase(e.target.value);
     if(fixed !== e.target.value){ e.target.value = fixed; d[f.split(".")[0]].name = fixed; markProblems(d); }
@@ -423,7 +427,7 @@ $("#rows").addEventListener("click", async e => {
   if(forget){
     e.preventDefault();
     if(!confirm(`Создать «${forget}» ещё раз? В amoCRM появится вторая такая сделка.`)) return;
-    if(!await post("/api/forget", {name: forget})) return;
+    if(!await post("/api/forget", {name: forget, pipeline: $("#pipeline").value})) return;
     for(const list of [deals, original]){ const x = list.find(x => x.name === forget); if(x){ x.done = null; x.doneStatus = null; x.sel = true; } }
     renderRows(); return;
   }
@@ -477,13 +481,14 @@ function paintStatuses(){
     else if(s.status === "queued") html = '<span class="badge b-q">в очереди</span>';
     else if(s.status === "error") html = `<span class="badge b-err">ошибка</span><span class="err">${esc(s.error)}</span>`;
     else if(s.status === "partial") html = `<span class="badge b-part">не полностью</span><span class="err">${esc(s.error)}</span>`;
+    else if(s.status === "uncertain" || d.doneStatus === "uncertain") html = '<span class="badge b-err">проверить сохранение в amoCRM</span>';
     else if(d.doneStatus === "partial") html = '<span class="badge b-part">дозаполнить</span>';
     else if(d.done) html = '<span class="badge b-ok">уже создана</span>';
     if(url) html += ` <a href="${esc(url)}" target="_blank">открыть</a>`;
     if(s.note === "ok" || (d.note && !s.status)) html += '<span class="note ok" title="В сделку добавлено примечание со списком детей из MAX">список детей ✓</span>';
     else if(s.note === "none") html += '<span class="note no" title="В чате MAX нет сообщения со списком этого класса">нет списка в MAX</span>';
     else if(s.note === "error") html += '<span class="note err" title="Подробности — в журнале">список не добавлен</span>';
-    if(isDone(d) && !s.status) html += ` <a href="#" data-forget="${esc(d.name)}">ещё раз</a>`;
+    if((isDone(d) && !s.status) || s.status === "uncertain" || d.doneStatus === "uncertain") html += ` <a href="#" data-forget="${esc(d.name)}">ещё раз</a>`;
     const cell = tr.querySelector(".status");
     if(cell.innerHTML !== html) cell.innerHTML = html;
     tr.classList.toggle("done", isDone(d) || s.status === "ok" || s.status === "skip");
@@ -492,7 +497,7 @@ function paintStatuses(){
 
 function selected(){ return deals.filter(d => d.sel); }
 // созданные сделки без списка детей
-function noteRows(){ return deals.filter(d => (isDone(d) || ["ok","skip"].includes((S.rows[d.id]||{}).status)) && !d.note && (S.rows[d.id]||{}).note !== "ok"); }
+function noteRows(){ return deals.filter(d => d.doneStatus !== "uncertain" && (isDone(d) || ["ok","skip"].includes((S.rows[d.id]||{}).status)) && !d.note && (S.rows[d.id]||{}).note !== "ok"); }
 function failedRows(){ return deals.filter(d => ["error","partial"].includes((S.rows[d.id]||{}).status)); }
 
 function updateUI(){
@@ -512,8 +517,15 @@ function updateUI(){
 const plural = (n, one, few, many) => (n%10===1 && n%100!==11) ? one : (n%10>=2 && n%10<=4 && (n%100<10||n%100>=20)) ? few : many;
 
 // ---------- запуск ----------
+function editedClass(d){
+  let name = d.name.trim();
+  if(prefix && name.startsWith(prefix + " ")) name = name.slice(prefix.length).trim();
+  if(d.school && name.endsWith(" " + d.school)) return name.slice(0, -d.school.length).trim();
+  const match = name.match(/^(?:гр(?:уппа)?\.?\s*)?\d{1,2}(?:\s*[-«"]?\s*[а-яёa-z]{1,2}[»"]?)?(?=\s|$)/i);
+  return match ? match[0] : d.klass;
+}
 async function run(list, notesOnly = false){
-  const items = list.map(d => ({ id: d.id, name: d.name.trim(), klass: d.klass, contacts: [{role: lead(), ...d.kr}, {role:"РК", ...d.rk}] }));
+  const items = list.map(d => ({ id: d.id, name: d.name.trim(), klass: editedClass(d), contacts: [{role: KIND[d.kind].lead, ...d.kr}, {role:"РК", ...d.rk}] }));
   const maxChat = $("#maxChat").value.trim();
   if(notesOnly){
     if(!maxChat){ alert("Впишите название чата MAX со списками детей"); $("#maxChat").focus(); return; }
@@ -550,8 +562,26 @@ function fillPipelines(list){
   sel.dataset.key = key;
   const saved = store.get("pipeline");
   sel.innerHTML = list.map(p => `<option ${p===saved?"selected":""}>${esc(p)}</option>`).join("");
+  refreshProgress();
 }
-$("#pipeline").onchange = e => store.set("pipeline", e.target.value);
+async function refreshProgress(){
+  const rows = deals, pipeline = $("#pipeline").value;
+  if(!rows.length || S.running) return;
+  const names = rows.map(d => d.name);
+  const response = await fetch("/api/progress", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({names,pipeline})});
+  if(!response.ok) return;
+  const records = await response.json();
+  if(rows !== deals || pipeline !== $("#pipeline").value || S.running) return;
+  rows.forEach((d,i) => {
+    if(d.name !== names[i]) return;
+    const wasDone = isDone(d), rec = records[i];
+    d.done = rec.url; d.doneStatus = rec.status; d.note = !!rec.note; d._final = false;
+    if(isDone(d)) d.sel = false;
+    else if(wasDone) d.sel = !d.red;
+  });
+  S.rows = {}; renderRows();
+}
+$("#pipeline").onchange = e => { store.set("pipeline", e.target.value); refreshProgress(); };
 
 // ---------- состояние с сервера ----------
 async function poll(){
@@ -561,6 +591,7 @@ async function poll(){
     $("#conn").textContent = "программа закрыта — запустите её снова"; $("#conn").classList.remove("on"); return;
   }
   fillPipelines(S.pipelines || []);
+  if(S.rowPipeline && S.rowPipeline !== $("#pipeline").value) S.rows = {};
   if(S.version) $("#ver").textContent = "версия " + S.version;
   const conn = $("#conn");
   conn.textContent = S.loggedIn ? "amoCRM подключена" : (S.phase === "login" ? "amoCRM: вход…" : "amoCRM: войти");

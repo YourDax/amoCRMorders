@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from excel_reader import read_deals
+from excel_reader import read_deals, progress_key
 
 import paths
 
@@ -33,10 +33,12 @@ def save_progress(progress: dict):
     PROGRESS.write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def print_preview(deals, progress):
+def print_preview(deals, progress, pipeline):
     print(f"\nНайдено сделок: {len(deals)}\n")
     for i, d in enumerate(deals, 1):
-        mark = "  (уже создана — пропуск)" if d.key in progress else ""
+        mark = "  (уже создана — пропуск)" if progress_key(progress, d.name, pipeline) in progress else ""
+        if d.red: mark += " (красная строка — пропуск)"
+        elif d.refused: mark += " (возможный отказ)"
         print(f"{i:>3}. [{d.sheet}, стр.{d.row}] {d.name}{mark}")
         for c in d.contacts:
             print(f"       {c.role}: {c.name or '—'} | тел: {c.phone_field or '—'}")
@@ -54,6 +56,7 @@ def main() -> int:
     ap.add_argument("--step", action="store_true", help="пауза перед каждым «Сохранить» для проверки")
     ap.add_argument("--yes", action="store_true", help="не спрашивать подтверждение")
     ap.add_argument("--probe", action="store_true", help="диагностика формы новой сделки")
+    ap.add_argument("--pipeline", default="", help="воронка amoCRM")
     args = ap.parse_args()
 
     cfg = paths.load_config()
@@ -80,10 +83,10 @@ def main() -> int:
         return 1
 
     deals, warnings = read_deals(args.xlsx, args.sheet, args.school)
-    print_preview(deals, progress)
+    print_preview(deals, progress, args.pipeline)
     for w in warnings:
         print("! ", w)
-    todo = [d for d in deals if d.key not in progress]
+    todo = [d for d in deals if not d.red and progress_key(progress, d.name, args.pipeline) not in progress]
     if args.limit:
         todo = todo[: args.limit]
 
@@ -110,19 +113,25 @@ def main() -> int:
         for n, d in enumerate(todo, 1):
             print(f"[{n}/{len(todo)}] {d.name} ...", end=" ", flush=True)
             try:
-                url = bot.create_deal(d)
+                url = bot.create_deal(d, args.pipeline)
             except Exception as e:  # noqa: BLE001
+                if getattr(e, "uncertain_save", False):
+                    url = bot.deal_url() if not bot.closed and "/leads/detail/" in bot.page.url else None
+                    progress[progress_key(progress, d.name, args.pipeline)] = {"status": "uncertain", "url": url}
+                    save_progress(progress)
+                    print("Результат сохранения нужно проверить в amoCRM. Повтор заблокирован.")
+                    return 2
                 shot = bot.screenshot(f"error-{d.name}")
                 print(f"ОШИБКА: {e}\n    скриншот: {shot}\n    текущая страница: {bot.page.url}")
                 if "/leads/detail/" in bot.page.url:
                     # сделка уже сохранена, но, возможно, без второго контакта — помечаем, чтобы не задвоить
-                    progress[d.key] = {"url": bot.page.url, "status": "partial", "error": str(e),
+                    progress[progress_key(progress, d.name, args.pipeline)] = {"url": bot.page.url, "status": "partial", "error": str(e),
                                        "at": time.strftime("%Y-%m-%d %H:%M")}
                     save_progress(progress)
                     print("    сделка помечена как partial — проверьте её вручную")
                 print("Остановлено. После исправления запустите снова — созданные сделки будут пропущены.")
                 return 2
-            progress[d.key] = {"url": url, "status": "ok", "at": time.strftime("%Y-%m-%d %H:%M")}
+            progress[progress_key(progress, d.name, args.pipeline)] = {"url": url, "status": "ok", "at": time.strftime("%Y-%m-%d %H:%M")}
             save_progress(progress)
             ok += 1
             print("ok", url)

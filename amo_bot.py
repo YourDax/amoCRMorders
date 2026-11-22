@@ -253,6 +253,34 @@ class AmoBot:
             return {}
         return {name: f"{self.base_url}/leads/pipeline/{pid}/" for name, pid in data if name and pid}
 
+    def stored_pipeline_names(self, urls):
+        """Разрешает старые записи истории по фактической воронке карточки."""
+        from urllib.parse import urlsplit
+        ids = {}
+        for url in urls:
+            if url and urlsplit(url).netloc == urlsplit(self.base_url).netloc:
+                match = re.fullmatch(r"/leads/detail/(\d+)/?", urlsplit(url).path)
+                if match:
+                    ids[match[1]] = url
+        if not ids:
+            return {}
+        names = {url.rstrip("/").split("/")[-1]: name for name, url in self._pipelines_from_api().items()}
+        result = {}
+        for start in range(0, len(ids), 50):
+            batch = list(ids)[start:start+50]
+            leads = self.page.evaluate("""async ids => {
+                const q = new URLSearchParams();
+                ids.forEach(id => q.append('filter[id][]', id));
+                const r = await fetch('/api/v4/leads?' + q);
+                if (r.status !== 200) return [];
+                return (await r.json())._embedded?.leads || [];
+            }""", batch)
+            for lead in leads:
+                ident, pid = str(lead["id"]), str(lead["pipeline_id"])
+                if ident in ids and pid in names:
+                    result[ids[ident]] = names[pid]
+        return result
+
     def _pipelines_from_menu(self) -> dict[str, str]:
         """Пункты воронок, которые сейчас есть в разметке меню «Сделки» (в том числе скрытые)."""
         pairs = self.page.evaluate("""() => [...document.querySelectorAll('a[href*="/leads/pipeline/"]')]
@@ -457,6 +485,14 @@ class AmoBot:
         p = self.page
         self.check_stop()
         new_deal = "/leads/add" in p.url
+        try:
+            self._save_and_wait(new_deal)
+        except Exception as exc:
+            exc.uncertain_save = True
+            raise
+
+    def _save_and_wait(self, new_deal):
+        p = self.page
         self._click_save()
         # Не ждём «networkidle»: amoCRM постоянно держит соединения, и такое ожидание
         # никогда не заканчивается. Ждём конкретных признаков сохранения.
