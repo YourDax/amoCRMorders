@@ -105,6 +105,8 @@ body:not(.loaded) .filebar{display:block}
 .seg button:hover:not(:disabled){color:var(--text);border-color:var(--line-2)}
 .seg button[aria-pressed=true]{background:var(--accent-weak);color:var(--accent);font-weight:600}
 .meta .seg-wrap{display:inline-flex;align-items:center;gap:8px}
+.max-count-warning{max-height:12rem;overflow:auto}
+.max-count-warning ul{margin:4px 0;padding-left:20px}
 .warn{background:var(--warn-weak);color:var(--warn);border-left:3px solid var(--warn-line);border-radius:0 var(--r) var(--r) 0;padding:7px 12px;margin-top:10px;font-size:12px}
 
 /* панель запуска */
@@ -168,13 +170,35 @@ button.x:hover:not(:disabled){background:var(--err-weak);color:var(--err)}
 details summary{cursor:pointer;color:var(--muted);font-size:12px;padding:8px 14px;user-select:none}
 details summary:hover{color:var(--text)}
 #log{font:12px/1.5 "Cascadia Mono",Consolas,ui-monospace,monospace;background:var(--input);border-top:1px solid var(--line);padding:10px 14px;height:240px;overflow:auto;white-space:pre-wrap;margin:0}
+/* история таблиц */
+.hist{position:relative}
+#histBtn{height:26px;padding:0 9px;font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+#histBtn:hover:not(:disabled){color:var(--text)}
+#histBtn svg{width:10px;height:10px}
+#histPop{position:absolute;top:32px;left:0;width:440px;max-width:calc(100vw - 32px);max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);box-shadow:0 6px 24px rgba(0,0,0,.18);z-index:20;padding:4px 0}
+.hitem{display:block;width:100%;height:auto;text-align:left;border:none;border-radius:0;padding:7px 12px;background:none}
+.hitem+.hitem{border-top:1px solid var(--line)}
+.hitem:hover:not(:disabled){background:var(--hover)}
+.hitem.cur{box-shadow:inset 3px 0 0 var(--accent)}
+.hitem .h1{display:flex;gap:10px;align-items:baseline}
+.hitem .h1 b{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hitem .h2,.hitem .h3{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hitem .h3{color:var(--faint)}
+.hstate{font-size:12px;white-space:nowrap}
+.st-done{color:var(--ok)} .st-work{color:var(--warn)} .st-new,.st-empty{color:var(--faint)}
+.hempty{padding:12px;color:var(--muted);font-size:12px}
 @media (max-width:700px){ header{padding:0 16px} main{padding:12px 16px} .meta>*{padding:0 10px} select{min-width:0;max-width:100%} }
 </style>
 </head>
 <body>
 <header>
   <h1>Сделки в amoCRM</h1>
+  <select id="browser" aria-label="Браузер amoCRM и MAX" title="Браузер amoCRM и MAX"><option value="auto">Авто</option><option value="msedge">Edge</option><option value="chromium">Chromium</option></select>
   <button id="conn" class="status-conn" title="Открыть окно amoCRM и войти">amoCRM: войти</button>
+  <div class="hist">
+    <button id="histBtn" title="Прежние таблицы: продолжить работу" aria-haspopup="true" aria-expanded="false">История <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3.5l3 3 3-3"/></svg></button>
+    <div id="histPop" class="hidden" role="menu"></div>
+  </div>
   <div class="spacer"></div>
   <button id="theme" title="Сменить тему оформления"></button>
   <span id="ver"></span>
@@ -189,13 +213,14 @@ details summary:hover{color:var(--text)}
     </div>
     <input type="file" id="file" accept=".xlsx" hidden>
     <div id="warnings"></div>
+    <div id="maxCountWarning" role="status" aria-live="polite"></div>
   </section>
 
   <!-- 2. действие -->
   <section class="panel panel-body hidden" id="actionCard">
     <div class="action">
       <label><span class="lbl">Воронка</span> <select id="pipeline"></select></label>
-      <label title="Точное название беседы в MAX, например «Щ_10 - Зима 2026». Из неё в примечание каждой сделки попадёт список детей её класса (самое свежее сообщение). Пусто — без списков"><span class="lbl">Чат MAX со списками</span> <input id="maxChat" placeholder="например, Щ_10 - Зима 2026" size="26"></label>
+      <label title="Необязательно. Точное название беседы в MAX, например «Щ_10 - Зима 2026». Из неё в примечание каждой сделки попадёт список детей её класса (самое свежее сообщение). Пусто — сделки создаются без списков. После перезапуска программы поле пустое"><span class="lbl">Чат MAX со списками</span> <input id="maxChat" placeholder="необязательно" size="26"></label>
       <label title="Перед каждым «Сохранить» бот остановится, чтобы вы проверили форму"><input type="checkbox" id="step"> Проверять перед сохранением</label>
       <div class="spacer"></div>
       <button class="danger hidden" id="btnStop">Стоп</button>
@@ -246,15 +271,22 @@ const store = {
 };
 
 let deals = [], original = [], school = "", prefix = "", fileSchool = "", kind = "school", fileKind = "school";
+let histId = null, curFile = "", curWarnings = [];  // запись «Истории», в которую сохраняется таблица
 // школа: сделка «1а ВХТЛ-сп4», первый контакт КР; детский сад: «гр.11 1368-до4», первый контакт ВС
 const KIND = {
   school:       {lead: "КР", place: "Школа",       units: "Классов"},
   kindergarten: {lead: "ВС", place: "Детский сад", units: "Групп"},
 };
 const lead = () => KIND[kind].lead;
+// класс: «6 Ж» → «6ж», «3Б» → «3б» (как norm_class в excel_reader.py); другие записи не трогаем
+function normClass(klass){
+  const m = /^(\d{1,2})\s*([A-Za-zА-Яа-яЁё]{1,2})$/.exec(klass);
+  return m ? m[1] + m[2].toLowerCase() : klass;
+}
 function autoName(klass, place, k, pre = ""){
   klass = String(klass ?? "").trim();
-  if(k === "kindergarten") klass = "гр." + klass.replace(/^гр(уппа)?\.?\s*/i, "");
+  if(k === "kindergarten") klass = "гр." + normClass(klass.replace(/^гр(уппа)?\.?\s*/i, ""));
+  else klass = normClass(klass);
   return `${pre.trim()} ${klass} ${place}`.trim().replace(/\s+/g, " ");
 }
 // ФИО с заглавных букв: «диля халимовна» → «Диля Халимовна», «анна-мария» → «Анна-Мария»
@@ -306,7 +338,7 @@ const drop = $("#drop"), fileInp = $("#file");
 drop.onclick = () => fileInp.click();
 drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
+drop.ondrop = e => { e.preventDefault(); e.stopPropagation(); drop.classList.remove("over"); if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
 fileInp.onchange = () => fileInp.files[0] && upload(fileInp.files[0]);
 // файл можно бросить в любое место окна
 document.addEventListener("dragover", e => e.preventDefault());
@@ -315,14 +347,27 @@ document.addEventListener("drop", e => { e.preventDefault(); if(e.dataTransfer.f
 async function upload(f){
   if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
   if(!/\.xlsx$/i.test(f.name)){ alert("Нужен файл .xlsx"); return; }
+  saveNow();
   const fd = new FormData(); fd.append("file", f); fd.append("pipeline", $("#pipeline").value);
   const r = await fetch("/api/parse", {method:"POST", body: fd});
   const j = await r.json();
   fileInp.value = "";
   if(!r.ok){ alert(j.error); return; }
   j.deals.forEach(d => d.sel = !isDone(d) && !d.red);
-  original = clone(j.deals); deals = clone(j.deals); school = j.school || "";
-  prefix = ""; fileSchool = school; kind = fileKind = j.kind === "kindergarten" ? "kindergarten" : "school";
+  const k = j.kind === "kindergarten" ? "kindergarten" : "school";
+  showTable({id: j.historyId, file: j.file, deals: j.deals, original: j.deals, school: j.school || "",
+             fileSchool: j.school || "", prefix: "", kind: k, fileKind: k, warnings: j.warnings || []});
+}
+
+// показать таблицу: только что загруженную или из «Истории»
+function showTable(e){
+  S.rows = {}; S.total = 0; S.maxWarnings = [];
+  const strip = list => clone(list || []).map(d => { d.kind ??= e.kind; d.school ??= e.school; delete d._final; return d; });
+  histId = e.id || null; curFile = e.file || ""; curWarnings = e.warnings || [];
+  original = strip(e.original); deals = strip(e.deals); school = e.school || ""; prefix = e.prefix || "";
+  fileSchool = e.fileSchool || ""; kind = KIND[e.kind] ? e.kind : "school"; fileKind = KIND[e.fileKind] ? e.fileKind : kind;
+  const j = {file: curFile, warnings: curWarnings};
+  lastSaved = histSig();
   document.body.classList.add("loaded");
   $("#drop").innerHTML = '<span class="big-t">Другой файл…</span>';
   const refused = deals.filter(d => d.refused && !d.red).length, red = deals.filter(d => d.red).length, done = deals.filter(isDone).length;
@@ -333,7 +378,7 @@ async function upload(f){
         <button type="button" data-kind="school">Школа</button><button type="button" data-kind="kindergarten">Детский сад</button>
       </span></span>
     <label><span id="placeLbl"></span> <input id="school" value="${esc(school)}" title="Поменяет название во всех сделках"></label>
-    <label title="Добавляется в начало названия всех сделок и «Названия компании», например НГ → «НГ 3в Под_18-сп1»">Префикс <input id="prefix" value="" placeholder="например, НГ" size="10"></label>
+    <label title="Добавляется в начало названия всех сделок и «Названия компании», например НГ → «НГ 3в Под_18-сп1»">Префикс <input id="prefix" value="${esc(prefix)}" placeholder="например, НГ" size="10"></label>
     <span><span id="unitsLbl"></span>: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
     ${red ? `<span>Красные в файле: <b>${red}</b> (не отмечены)</span>` : ""}
@@ -426,9 +471,14 @@ $("#rows").addEventListener("click", async e => {
   const forget = e.target.dataset && e.target.dataset.forget;
   if(forget){
     e.preventDefault();
-    if(!confirm(`Создать «${forget}» ещё раз? В amoCRM появится вторая такая сделка.`)) return;
-    if(!await post("/api/forget", {name: forget, pipeline: $("#pipeline").value})) return;
-    for(const list of [deals, original]){ const x = list.find(x => x.name === forget); if(x){ x.done = null; x.doneStatus = null; x.sel = true; } }
+    const d = byId(forget);
+    if(!confirm(`Создать «${d.name}» ещё раз? В amoCRM появится вторая такая сделка.`)) return;
+    if(!await post("/api/forget", {id: d.id, name: d.name, pipeline: $("#pipeline").value})) return;
+    for(const list of [deals, original]){
+      const x = list.find(x => x.id === d.id);
+      if(x){ x.done = null; x.doneStatus = null; x.note = false; delete x.countWarning; x.sel = true; delete x._final; }
+    }
+    delete S.rows[d.id];
     renderRows(); return;
   }
   const btn = e.target.closest("button.x"); if(!btn) return;
@@ -457,13 +507,26 @@ $("#btnRestore").onclick = () => {
 };
 $("#btnClear").onclick = () => {
   if(S.running) return;
-  if(!confirm("Очистить список? В amoCRM ничего не удалится.")) return;
+  if(!confirm("Убрать таблицу с экрана? Она останется в «Истории», в amoCRM ничего не удалится.")) return;
+  saveNow(); histId = null;
   deals = []; original = [];
   document.body.classList.remove("loaded");
   $("#drop").innerHTML = '<div class="big-t">Перетащите сюда отчёт .xlsx</div>или нажмите, чтобы выбрать файл';
   ["#meta","#actionCard","#tableCard"].forEach(s => $(s).classList.add("hidden"));
   $("#warnings").innerHTML = "";
+  renderCountWarnings();
 };
+
+function renderCountWarnings(){
+  const counts = deals.filter(d => d.countWarning).map(d => `${d.name} — ${d.countWarning}`);
+  const warnings = deals.length ? [...(S.maxWarnings || []), ...counts] : [];
+  const box = $("#maxCountWarning");
+  const html = warnings.length
+    ? `<div class="warn max-count-warning"><strong>Предупреждения MAX</strong>
+         <ul>${warnings.map(warning => `<li>${esc(warning)}</li>`).join("")}</ul></div>`
+    : "";
+  if(box.innerHTML !== html) box.innerHTML = html;
+}
 
 function paintStatuses(){
   for(const d of deals){
@@ -488,11 +551,14 @@ function paintStatuses(){
     if(s.note === "ok" || (d.note && !s.status)) html += '<span class="note ok" title="В сделку добавлено примечание со списком детей из MAX">список детей ✓</span>';
     else if(s.note === "none") html += '<span class="note no" title="В чате MAX нет сообщения со списком этого класса">нет списка в MAX</span>';
     else if(s.note === "error") html += '<span class="note err" title="Подробности — в журнале">список не добавлен</span>';
-    if((isDone(d) && !s.status) || s.status === "uncertain" || d.doneStatus === "uncertain") html += ` <a href="#" data-forget="${esc(d.name)}">ещё раз</a>`;
+    if(Object.hasOwn(s, "countWarning")) d.countWarning = s.countWarning;
+    if(d.countWarning) html += ` <span class="note no">${esc(d.countWarning)}</span>`;
+    if((isDone(d) || s.status === "uncertain") && !S.running) html += ` <a href="#" data-forget="${esc(d.id)}">ещё раз</a>`;
     const cell = tr.querySelector(".status");
     if(cell.innerHTML !== html) cell.innerHTML = html;
     tr.classList.toggle("done", isDone(d) || s.status === "ok" || s.status === "skip");
   }
+  renderCountWarnings();
 }
 
 function selected(){ return deals.filter(d => d.sel); }
@@ -509,7 +575,9 @@ function updateUI(){
   btn.title = bad ? `У ${bad} выбранных есть замечания (подсвечены жёлтым) — можно создавать и так` : "";
   $("#btnStop").classList.toggle("hidden", !S.running);
   $("#btnRetry").classList.toggle("hidden", S.running || !failedRows().length);
-  $("#btnNotes").classList.toggle("hidden", S.running || !noteRows().length);
+  $("#btnNotes").classList.toggle("hidden", S.running || !$("#maxChat").value.trim() || !noteRows().length);
+  $("#histBtn").disabled = !!S.running;
+  autosave();
   const selectable = deals.filter(d => !isDone(d));
   $("#all").checked = selectable.length > 0 && selectable.every(d => d.sel);
   document.querySelectorAll("button.x").forEach(b => b.disabled = S.running);
@@ -525,12 +593,13 @@ function editedClass(d){
   return match ? match[0] : d.klass;
 }
 async function run(list, notesOnly = false){
-  const items = list.map(d => ({ id: d.id, name: d.name.trim(), klass: editedClass(d), contacts: [{role: KIND[d.kind].lead, ...d.kr}, {role:"РК", ...d.rk}] }));
+  const items = list.map(d => ({ id: d.id, name: d.name.trim(), klass: editedClass(d), expectedKids: d.expectedKids, contacts: [{role: KIND[d.kind].lead, ...d.kr}, {role:"РК", ...d.rk}] }));
   const maxChat = $("#maxChat").value.trim();
   if(notesOnly){
     if(!maxChat){ alert("Впишите название чата MAX со списками детей"); $("#maxChat").focus(); return; }
     if(!confirm(`Добавить списки детей из чата MAX «${maxChat}» в ${items.length} ${plural(items.length,"созданную сделку","созданные сделки","созданных сделок")}?`)) return;
-    if(await post("/api/run", {deals: items, pipeline: $("#pipeline").value || "-", maxChat, notesOnly: true})) poll();
+    saveNow();
+    if(await post("/api/run", {deals: items, pipeline: $("#pipeline").value || "-", maxChat, browser: $("#browser").value, notesOnly: true, historyId: histId})) poll();
     return;
   }
   if(items.some(i => !i.name)){ alert("У некоторых сделок пустое название"); return; }
@@ -542,16 +611,22 @@ async function run(list, notesOnly = false){
   msg += maxChat ? `\n\nСписки детей — из чата MAX «${maxChat}».` : "\n\nЧат MAX не указан — без списков детей.";
   if(!S.loggedIn) msg += "\n\nОткроется окно amoCRM — если попросит, войдите в аккаунт.";
   if(!confirm(msg)) return;
-  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat})) poll();
+  saveNow();
+  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, browser: $("#browser").value, historyId: histId})) poll();
 }
 $("#btnRun").onclick = () => run(selected());
 $("#btnRetry").onclick = () => run(failedRows());
 $("#btnNotes").onclick = () => run(noteRows(), true);
-$("#maxChat").value = store.get("maxChat");
-$("#maxChat").onchange = e => store.set("maxChat", e.target.value.trim());
+// чат MAX необязателен и после перезапуска всегда пустой (раньше запоминался — забываем)
+try{ localStorage.removeItem("maxChat"); }catch(e){}
+$("#maxChat").value = "";
+$("#maxChat").oninput = () => updateUI();
 $("#btnStop").onclick = () => post("/api/stop");
 $("#btnContinue").onclick = () => post("/api/continue");
-$("#conn").onclick = () => { if(S.phase !== "run") post("/api/login"); };  // старое окно amoCRM закроется
+const browserSelect = $("#browser");
+browserSelect.value = ["auto","msedge","chromium"].includes(store.get("browser")) ? store.get("browser") : "auto";
+browserSelect.onchange = () => { store.set("browser", browserSelect.value); poll(); };
+$("#conn").onclick = () => { if(S.phase !== "run") post("/api/login", {browser: browserSelect.value}); };  // старое окно amoCRM закроется
 $("#step").checked = store.get("step") === "1";
 $("#step").onchange = e => store.set("step", e.target.checked ? "1" : "0");
 
@@ -567,13 +642,13 @@ function fillPipelines(list){
 async function refreshProgress(){
   const rows = deals, pipeline = $("#pipeline").value;
   if(!rows.length || S.running) return;
-  const names = rows.map(d => d.name);
+  const names = rows.map(d => d.id.startsWith("import-") ? d.id : d.name);
   const response = await fetch("/api/progress", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({names,pipeline})});
   if(!response.ok) return;
   const records = await response.json();
   if(rows !== deals || pipeline !== $("#pipeline").value || S.running) return;
   rows.forEach((d,i) => {
-    if(d.name !== names[i]) return;
+    if((d.id.startsWith("import-") ? d.id : d.name) !== names[i]) return;
     const wasDone = isDone(d), rec = records[i];
     d.done = rec.url; d.doneStatus = rec.status; d.note = !!rec.note; d._final = false;
     if(isDone(d)) d.sel = false;
@@ -582,6 +657,68 @@ async function refreshProgress(){
   S.rows = {}; renderRows();
 }
 $("#pipeline").onchange = e => { store.set("pipeline", e.target.value); refreshProgress(); };
+
+// ---------- история таблиц ----------
+let lastSaved = "", saveTimer = null;
+const histSig = () => JSON.stringify({file: curFile, kind, fileKind, school, fileSchool, prefix, warnings: curWarnings,
+  deals: deals.map(({_final, ...d}) => d), original: original.map(({_final, ...d}) => d)});
+function saveNow(){
+  clearTimeout(saveTimer); saveTimer = null;
+  if(!histId) return;
+  const sig = histSig();
+  if(sig === lastSaved) return;
+  lastSaved = sig;
+  fetch(`/api/history/${histId}`, {method:"POST", headers:{"Content-Type":"application/json"}, body: sig, keepalive: true})
+    .catch(() => { lastSaved = ""; });
+}
+// правки, галочки, отметки «создана» — сохраняются сами через секунду после изменения
+function autosave(){
+  if(!histId || saveTimer || histSig() === lastSaved) return;
+  saveTimer = setTimeout(saveNow, 1000);
+}
+window.addEventListener("pagehide", saveNow);
+
+const HSTATE = {
+  done:  h => `✓ закончена · ${h.created}/${h.total}`,
+  work:  h => `в работе · создано ${h.created} из ${h.created + h.pending + h.partial}` + (h.partial ? `, не полностью ${h.partial}` : ""),
+  new:   h => `не начата · ${h.pending} к созданию`,
+  empty: () => "пустая",
+};
+const fmtAt = s => { const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d:\d\d)/.exec(s || ""); return m ? `${m[3]}.${m[2]} ${m[4]}` : (s || ""); };
+async function openHistoryMenu(){
+  const pop = $("#histPop");
+  pop.innerHTML = '<div class="hempty">Загрузка…</div>'; pop.classList.remove("hidden");
+  $("#histBtn").setAttribute("aria-expanded", "true");
+  saveNow();
+  let items = [];
+  try{ items = (await (await fetch("/api/history")).json()).items || []; }catch(e){}
+  if(!items.length){ pop.innerHTML = '<div class="hempty">Пока пусто — здесь появятся загруженные таблицы и что с ними делали.</div>'; return; }
+  pop.innerHTML = items.map(h => {
+    const acts = (h.actions || []).slice().reverse();
+    return `<button class="hitem${h.id === histId ? " cur" : ""}" data-hid="${esc(h.id)}" role="menuitem"
+      title="${esc(acts.map(a => fmtAt(a.at) + "  " + a.text).join("\n"))}">
+      <div class="h1"><b>${esc(h.file)}</b><span class="hstate st-${esc(h.state)}">${esc((HSTATE[h.state] || HSTATE.empty)(h))}</span></div>
+      <div class="h2">${esc(h.school ? h.school + " · " : "")}изменена ${esc(fmtAt(h.updated))}</div>
+      ${acts[0] ? `<div class="h3">${esc(fmtAt(acts[0].at) + " — " + acts[0].text)}</div>` : ""}
+    </button>`;
+  }).join("");
+}
+function closeHistoryMenu(){ $("#histPop").classList.add("hidden"); $("#histBtn").setAttribute("aria-expanded", "false"); }
+$("#histBtn").onclick = e => { e.stopPropagation(); $("#histPop").classList.contains("hidden") ? openHistoryMenu() : closeHistoryMenu(); };
+document.addEventListener("click", e => { if(!e.target.closest(".hist")) closeHistoryMenu(); });
+document.addEventListener("keydown", e => { if(e.key === "Escape") closeHistoryMenu(); });
+$("#histPop").addEventListener("click", async e => {
+  const b = e.target.closest("[data-hid]"); if(!b) return;
+  closeHistoryMenu();
+  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
+  if(b.dataset.hid === histId) return;
+  saveNow();
+  const r = await fetch(`/api/history/${encodeURIComponent(b.dataset.hid)}`);
+  const j = await r.json().catch(() => ({}));
+  if(!r.ok){ alert(j.error || "Не удалось открыть таблицу"); return; }
+  S.rows = {}; S.total = 0;
+  showTable(j.entry);
+});
 
 // ---------- состояние с сервера ----------
 async function poll(){
@@ -594,8 +731,10 @@ async function poll(){
   if(S.rowPipeline && S.rowPipeline !== $("#pipeline").value) S.rows = {};
   if(S.version) $("#ver").textContent = "версия " + S.version;
   const conn = $("#conn");
-  conn.textContent = S.loggedIn ? "amoCRM подключена" : (S.phase === "login" ? "amoCRM: вход…" : "amoCRM: войти");
-  conn.classList.toggle("on", S.loggedIn);
+  browserSelect.disabled = !!S.running;
+  const connected = S.loggedIn && S.browser === browserSelect.value;
+  conn.textContent = connected ? "amoCRM подключена" : (S.phase === "login" ? "amoCRM: вход…" : "amoCRM: войти");
+  conn.classList.toggle("on", connected);
   conn.disabled = S.phase === "run";
   conn.title = S.phase === "run" ? "Идёт создание сделок"
     : (S.loggedIn || S.phase === "login") ? "Открыть окно amoCRM заново (старое закроется)" : "Открыть окно amoCRM и войти";
@@ -609,7 +748,8 @@ async function poll(){
   if(S.total){
     const finished = S.doneN + S.failedN;
     $("#barFill").style.width = Math.round(finished / S.total * 100) + "%";
-    $("#pCount").innerHTML = `Создано <b>${S.doneN}</b> из <b>${S.total}</b>` + (S.failedN ? ` · ошибок <b>${S.failedN}</b>` : "");
+    $("#pCount").innerHTML = `Готово <b>${S.doneN}</b> из <b>${S.total}</b>`
+      + (S.notesN ? ` · списков детей <b>${S.notesN}</b>` : "") + (S.failedN ? ` · ошибок <b>${S.failedN}</b>` : "");
     document.title = S.running ? `${finished}/${S.total} · Сделки в amoCRM` : "Сделки в amoCRM";
   }
   $("#lastLog").textContent = S.running ? (S.log[S.log.length-1] || "").replace(/^\S+\s+/, "") : "";

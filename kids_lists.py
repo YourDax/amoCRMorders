@@ -33,13 +33,19 @@ _INLINE_RE = re.compile(
     r"(?:\s*(?:класс\w*|кл\.?))?(?=[\s,:;.\-–])[\s,:;.\-–]+(\S.*)$", re.I)
 
 
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+
+
 def class_key(text: str) -> str:
     """«6 «Б» класс» → «6б», «гр.11» → «11». Пусто, если это не похоже на класс/группу."""
-    s = str(text or "").strip().lower().replace("ё", "е")
+    s = _INVISIBLE_RE.sub("", str(text or "")).strip().lower().replace("ё", "е")
     s = _WORDS_RE.sub(" ", s)
     s = re.sub(r"[\s\-–—_.,:;\"'«»“”„()№]+", "", s)
     s = s.translate(_LATIN)
     return s if _KEY_RE.match(s) else ""
+
+
+_HEADER_COUNT_RE = re.compile(r"\s*[,;–—-]?\s+\d{1,3}\s*(?:чел(?:овек)?\.?|детей|реб[её]нка)\s*[:.]?$", re.I)
 
 
 def _header_key(line: str) -> str:
@@ -60,6 +66,7 @@ def people(line: str) -> int:
         return 0
     marked = bool(re.match(r"^(?:\d+[.)\-:]|[•*–—-])", line))
     line = re.sub(r"^(?:\d+[.)\-:]|[•*–—-])\s*", "", line)
+    line = re.sub(r"\s+\d{1,2}\s*[а-яёa-z]{1,2}$", "", line, flags=re.I)
     parts = re.split(r"[,;]|\s+и\s+", line)
     return sum(bool(re.fullmatch(r"[А-ЯЁA-Z][\w’'-]*(?:\s+[А-ЯЁA-Z][\w.’'-]*){0,3}[.]?", part.strip(), flags=re.I if marked else 0)) for part in parts)
 
@@ -145,6 +152,11 @@ def merge_history(history: list[str], older: list[str]) -> list[str]:
         if older[-k:] == history[:k]:
             return older[:-k] + history
     return older + history
+
+
+_LIST_PREFIX_RE = re.compile(r"^(?:\d{1,3}(?:\s*[.)\-–:]\s*|\s+)|[•*\-–]\s*)")
+_COUNT_COMMENT_RE = re.compile(r"^(?:идут\b|снимаются\b|список\b|всего\b|итого\b|количество\b|на\s+фотосессию\b)", re.I)
+_PERSON_RE = re.compile(r"[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*(?:\s+[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*){0,2}")
 
 
 def count_kids(body: str) -> int:

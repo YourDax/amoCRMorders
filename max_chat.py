@@ -12,10 +12,11 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections import Counter
 
 from playwright.sync_api import BrowserContext, Page
 
-from kids_lists import collect_lists, full_list_keys, merge_history
+from kids_lists import collect_lists, full_list_keys, merge_history, parse_message
 
 MAX_URL = os.environ.get("AMO_MAX_URL", "https://web.max.ru/")  # другой адрес — только для проверок на макете
 _MAX_HOST = MAX_URL.split("://", 1)[-1].split("/", 1)[0]
@@ -51,15 +52,37 @@ _RESULTS_JS = """
 }
 """
 # Тексты сообщений на экране по порядку (сверху вниз = от старых к новым), без времени.
-_BUBBLES_JS = """
-() => [...document.querySelectorAll('[data-kids-scroller] .bubble')].filter(b => b.getClientRects().length).map((b) => {
-  const texts = [...b.querySelectorAll('.text')].filter((t) => !t.closest('.meta'));
-  return (texts.length ? texts.map((t) => t.innerText).join('\\n') : (b.innerText || '')).trim();
-}).filter(Boolean)
+_BUBBLES_JS = r"""
+() => {
+  const quote = 'blockquote, .reply, .quote, .quoted, [class*="replyPreview" i], [class*="replyMessage" i], '
+    + '[class*="reply-message" i], [class*="reply-preview" i], [class*="quotedMessage" i], '
+    + '[class*="quote-preview" i], [class*="messageReply" i], [class*="replyContent" i], [class^="reply-" i], [class^="quote-" i], [data-role="quote"], [data-role="reply"]';
+  const ignored = quote + ', .meta, [class*="sender" i], [class*="author" i], [data-role="author"], .bubble';
+  const bubbles = [...document.querySelectorAll('.bubble')].filter(b => !b.parentElement.closest('.bubble'));
+  const cleanText = node => {
+    if (!node.querySelector(ignored)) return node.innerText || '';
+    const clean = node.cloneNode(true);
+    clean.querySelectorAll(ignored).forEach(el => el.remove());
+    clean.querySelectorAll('br').forEach(el => el.replaceWith('\n'));
+    clean.querySelectorAll('div, p, li').forEach(el => el.append('\n'));
+    return clean.textContent.split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+  };
+  const messages = bubbles.map(b => {
+    const texts = [...b.querySelectorAll('.text')].filter(t => {
+      const excluded = t.closest(ignored);
+      const parentText = t.parentElement.closest('.text');
+      return (!excluded || excluded === b || !b.contains(excluded))
+        && (!parentText || !b.contains(parentText));
+    });
+    return (texts.length ? texts.map(cleanText).join('\n') : cleanText(b)).trim();
+  }).filter(Boolean);
+  return {messages, hasReplies: bubbles.some(b => b.querySelector(quote))};
+}
 """
 # Прокручиваемый контейнер истории — ближайший предок сообщения с прокруткой.
 _SCROLLER_JS = """
 () => {
+  document.querySelectorAll('[data-kids-scroller]').forEach(el => el.removeAttribute('data-kids-scroller'));
   const b = document.querySelector('.bubble');
   let el = b && b.parentElement;
   while (el && el !== document.body) {
@@ -79,7 +102,7 @@ _SCROLL_UP_JS = """
   const el = document.querySelector('[data-kids-scroller]');
   if (!el) return null;
   const before = el.scrollTop;
-  el.scrollBy(0, -Math.max(200, el.clientHeight * 0.5));
+  el.scrollBy({top: -Math.max(1, el.clientHeight * 0.5), behavior: 'instant'});
   return {before, after: el.scrollTop, height: el.scrollHeight};
 }
 """
@@ -197,7 +220,6 @@ class MaxChat:
         search.fill("")
         search.fill(name)
         found: list[tuple[int, str]] = []
-        prev, same = None, 0
         deadline = time.time() + 8
         while time.time() < deadline:
             self._sleep(400)
@@ -214,10 +236,6 @@ class MaxChat:
             titles = [t for _, t in found]
             if any(norm_title(t) == norm_title(name) for t in titles):
                 break
-            same = same + 1 if titles == prev else 0
-            prev = titles
-            if same >= (2 if titles else 5):
-                break
         self.log(f"MAX: найдено чатов: {len(found)}" + (f" ({', '.join(t for _, t in found[:5])})" if found else ""))
         idx = pick_chat([t for _, t in found], name)
         self.page.locator(".searchResultsList > *").nth(found[idx][0]).click()
@@ -226,7 +244,7 @@ class MaxChat:
             if norm_title(self._header_title()) == norm_title(found[idx][1]):
                 break
         else:
-            raise RuntimeError("MAX не подтвердил открытие выбранного чата")
+            raise RuntimeError("Не удалось подтвердить открытие выбранного чата MAX")
         self.log(f"MAX: открыт чат «{self._header_title() or found[idx][1]}»")
 
     def read_lists(self, chat: str, need: set[str]) -> dict[str, str]:
@@ -235,14 +253,18 @@ class MaxChat:
         Листает историю снизу вверх, пока у всех нужных классов не найдётся полный список
         или не дойдёт до начала чата (короткие записи вида «4в Сизинцева София» тоже собираются).
         """
+        self.warnings: list[str] = []
+        self._saw_replies = False
         self.open()
         self.open_chat(chat)
         for _ in range(40):  # сообщения подгружаются после открытия чата
-            if self.page.evaluate(_SCROLLER_JS):
+            if self._visible_messages():
                 break
             self._sleep(250)
         else:
             raise RuntimeError("В чате MAX не видно сообщений")
+        if not self.page.evaluate(_SCROLLER_JS):
+            return self._finish_lists(self._visible_messages(), need)
         self.page.evaluate(_SCROLL_BOTTOM_JS)
         self._sleep(800)
         history: list[str] = []  # тексты сообщений от старых к новым
@@ -251,7 +273,7 @@ class MaxChat:
         for step in range(SCROLL_MAX_STEPS):
             self._check_stop()
             before = len(history)
-            history = merge_history(history, self.page.evaluate(_BUBBLES_JS))
+            history = merge_history(history, self._visible_messages())
             full |= full_list_keys(history[:len(history) - before + 1])
             # полный список найден — более старые сообщения его уже не изменят
             if need and need <= full:
@@ -264,10 +286,33 @@ class MaxChat:
             if moved:
                 still = 0
             else:
-                h = self.page.evaluate("() => document.querySelector('[data-kids-scroller]').scrollHeight")
+                h = self.page.evaluate("() => document.querySelector('[data-kids-scroller]')?.scrollHeight")
                 still = 0 if h != pos["height"] else still + 1
                 if still >= 3:  # начало чата: прокрутка стоит и ничего не догружается
                     break
             if step and step % 20 == 0:
                 self.log(f"MAX: листаю историю… сообщений: {len(history)}, полных списков: {len(full & need)}")
-        return collect_lists(history)
+        else:
+            self.warnings.append("Достигнут предел чтения истории MAX. Списки из более ранних сообщений могли не попасть в сделки.")
+        return self._finish_lists(history, need)
+
+    def _visible_messages(self) -> list[str]:
+        result = self.page.evaluate(_BUBBLES_JS)
+        if result["hasReplies"] and not self._saw_replies:
+            self._saw_replies = True
+            self.warnings.append("В MAX найдены ответы с цитатами. Имена авторов и процитированный текст пропущены. Текст самого ответа учитывается, если в нём указан класс.")
+        return result["messages"]
+
+    def _finish_lists(self, messages: list[str], need: set[str]) -> dict[str, str]:
+        counts = Counter()
+        complete = set()
+        for text in messages:
+            entries = parse_message(text)
+            counts.update({key for key, _, _ in entries if key in need})
+            complete.update(key for key, _, full in entries if full)
+        for key, count in sorted(counts.items()):
+            if count > 1:
+                used = ("Взяли последний полный список и дополнения с классом после него."
+                        if key in complete else "Объединили короткие записи с этим классом.")
+                self.warnings.append(f"Класс {key}: найдено несколько сообщений ({count}). {used}")
+        return collect_lists(messages)

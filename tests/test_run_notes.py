@@ -92,6 +92,29 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(self.calls[-1], ["7а"])
         self.assertEqual(bot2.notes, [])  # для 7а в чате списка по-прежнему нет
 
+    def test_same_name_in_two_imports_and_resume_first(self):
+        first = {**item(1, "5б"), "id": "import-first-1"}
+        second = {**first, "id": "import-second-1"}
+        bot = FakeBot()
+        app.run_deals(bot, [first], False, "P")
+        app.run_deals(bot, [second], False, "P")
+        app.run_deals(bot, [first], False, "P")
+        self.assertEqual(bot.created, 2)
+        self.assertEqual(app.S.rows[first["id"]]["url"], "https://x/leads/detail/1")
+        self.assertEqual(app.S.rows[second["id"]]["url"], "https://x/leads/detail/2")
+
+    def test_count_warning_does_not_stop_notes(self):
+        bot = FakeBot()
+        rows = [{**item(1, "5б"), "expectedKids": 2},
+                {**item(2, "6б"), "expectedKids": 2},
+                {**item(3, "7а"), "expectedKids": 3}]
+        app.run_deals(bot, rows, False, "P", "Чат")
+        self.assertEqual(bot.created, 3)
+        self.assertEqual(len(bot.notes), 2)
+        self.assertEqual(app.S.rows["r1"]["countWarning"], "В таблице 2, в MAX 1")
+        self.assertIsNone(app.S.rows["r2"].get("countWarning"))
+        self.assertEqual(app.S.rows["r3"]["countWarning"], "В таблице 3, в MAX 0")
+
     def test_without_chat_no_notes(self):
         bot = FakeBot()
         app.run_deals(bot, [item(1, "5б")], False, "P", "")
@@ -106,6 +129,27 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(bot2.created, 0)
         self.assertEqual(bot2.notes, [("https://x/leads/detail/1", LISTS["5б"])])
         self.assertEqual(app.S.rows["r2"]["status"], "error")  # 6б ещё не создана
+
+    def test_stop_while_reading_max_unqueues_rows(self):
+        def stopped(*_):
+            raise RuntimeError("Остановлено пользователем")
+        app.read_kids_lists = stopped
+        items = [item(1, "5б"), item(2, "6б")]
+        for it in items:
+            app.S.set_row(it["id"], status="queued")
+        with self.assertRaises(RuntimeError):
+            app.run_deals(FakeBot(), items, False, "P", "Щ_10 - Зима 2026")
+        app.clear_queued(items)  # так делает worker в finally
+        self.assertIsNone(app.S.rows["r1"]["status"])
+
+    def test_history_action_logged(self):
+        import history
+        history.FILE = Path(self.tmp.name) / "history.json"
+        hid = history.create({"file": "a.xlsx", "deals": []}, "Загружен файл")
+        app.run_deals(FakeBot(), [item(1, "5б"), item(2, "6б")], False, "P", "Щ_10 - Зима 2026")
+        app.log_history({"history_id": hid, "pipeline": "P", "max_chat": "Щ_10"})
+        self.assertEqual(history.get(hid)["actions"][-1]["text"],
+                         "Создание сделок (P): готово 2 из 2, списков детей 2")
 
 
 if __name__ == "__main__":

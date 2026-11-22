@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "amoCRMorders"
-VERSION = "1.0.13"
+VERSION = "1.0.20"
 
 FROZEN = bool(getattr(sys, "frozen", False))
 RES_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -30,6 +30,7 @@ LOG_DIR = DATA_DIR / "logs"
 PROFILE_DIR = DATA_DIR / "browser-profile"
 PROGRESS_FILE = DATA_DIR / "progress.json"
 UPLOADS_DIR = DATA_DIR / "uploads"
+HISTORY_FILE = DATA_DIR / "history.json"
 
 
 def load_config() -> dict:
@@ -41,3 +42,26 @@ def load_config() -> dict:
         except (FileNotFoundError, ValueError):
             pass
     return cfg
+
+
+def read_json(path: Path, default):
+    """JSON с диска; нет файла или он испорчен (обрыв записи) — default, испорченный файл
+    сохраняется рядом как *.bad, чтобы данные можно было достать вручную."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return default
+    except ValueError:
+        try:
+            Path(path).replace(Path(str(path) + ".bad"))
+        except OSError:
+            pass
+        return default
+
+
+def write_json(path: Path, data) -> None:
+    """Запись через временный файл: при сбое посередине старый файл остаётся целым."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)

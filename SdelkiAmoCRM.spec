@@ -35,6 +35,9 @@ version_info = VSVersionInfo(
 datas = [("static", "static"), ("config.json", ".")]
 # драйвер Playwright (node.exe + js) — без него бот не сможет управлять браузером
 datas += collect_data_files("playwright")
+chromium = Path("build/chromium-browsers")
+for browser in chromium.glob("chromium-*"):
+    datas.append((str(browser), f"chromium-browsers/{browser.name}"))
 
 a = Analysis(
     ["app.py"],

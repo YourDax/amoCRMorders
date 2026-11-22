@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import queue
 import sys
@@ -15,6 +14,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+import uuid
 from pathlib import Path
 
 import paths
@@ -28,6 +28,7 @@ if sys.stdout is None or sys.stderr is None:
 
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
+import history
 from excel_reader import Contact, Deal, progress_key, fix_name_case, read_deals  # noqa: E402
 from kids_lists import class_key, count_kids  # noqa: E402
 
@@ -53,12 +54,14 @@ class State:
         self.running = False
         self.logged_in = False
         self.browser_open = False
+        self.browser_choice = None
         self.phase: str | None = None      # "login" — открываем amoCRM / ждём входа, "run" — создаём сделки
         self.relogin = False               # пользователь ещё раз нажал «войти» — прервать текущий вход
         self.waiting: str | None = None    # текст паузы в пошаговом режиме
         self.stop_flag = False
         self.continue_evt = threading.Event()
-        self.total = self.done_n = self.failed_n = 0
+        self.total = self.done_n = self.failed_n = self.notes_n = 0
+        self.max_warnings: list[str] = []
         self.pipelines: list[str] = list(CONFIG.get("pipelines", []))
 
     def add_log(self, msg: str):
@@ -83,16 +86,12 @@ jobs: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 
 
 def load_progress() -> dict:
-    try:
-        return json.loads(PROGRESS.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
+    data = paths.read_json(PROGRESS, {})
+    return data if isinstance(data, dict) else {}
 
 
 def save_progress(p: dict):
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=PROGRESS.parent, delete=False) as tmp:
-        json.dump(p, tmp, ensure_ascii=False, indent=2)
-    os.replace(tmp.name, PROGRESS)
+    paths.write_json(PROGRESS, p)
 
 
 # ---------------- фоновый поток с браузером ----------------
@@ -136,23 +135,26 @@ def worker():
             bot = None
         S.logged_in = S.browser_open = False
 
-    def ensure_bot():
+    def ensure_bot(browser):
         nonlocal bot
+        if bot is not None and bot.browser != browser:
+            close_bot()
         if bot is not None:
             try:
-                if bot.closed:
+                if bot.closed or not S.logged_in:
                     raise BrowserClosed()
                 bot.page.title()
                 return bot
             except Exception:  # noqa: BLE001 — окно закрыли, откроем заново
                 close_bot()
         S.add_log("Открываю браузер amoCRM...")
-        bot = AmoBot(CONFIG["amo_url"], slow_mo=CONFIG.get("slow_mo_ms", 150))
+        bot = AmoBot(CONFIG["amo_url"], slow_mo=CONFIG.get("slow_mo_ms", 150), browser=browser)
         bot.log_cb = S.add_log
         bot.ui_pause = pause
         bot.should_stop = lambda: S.stop_flag
         bot.start()
         S.browser_open = True
+        S.browser_choice = browser
         bot.ensure_logged_in(wait_minutes=10, cancelled=lambda: S.relogin)
         S.logged_in = True
         try:
@@ -174,16 +176,25 @@ def worker():
                 if bot is not None:  # новое окно amoCRM — старое закрываем
                     S.add_log("Закрываю прежнее окно amoCRM.")
                     close_bot()
-                ensure_bot()
+                ensure_bot(payload["browser"])
             elif kind == "run":
-                run_deals(ensure_bot(), payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
-                          payload.get("max_chat", ""), payload.get("notes_only", False))
+                try:
+                    b = ensure_bot(payload["browser"])  # не вошли в amoCRM — в историю нечего писать
+                    try:
+                        run_deals(b, payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
+                                  payload.get("max_chat", ""), payload.get("notes_only", False))
+                    finally:
+                        log_history(payload)
+                finally:
+                    clear_queued(payload["deals"])
         except Exception as e:  # noqa: BLE001
-            if is_closed_error(e) or (bot is not None and bot.closed):
+            if is_closed_error(e) or (bot is not None and S.browser_open and bot.closed):
                 S.add_log("Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
                 close_bot()
             elif S.relogin:
                 S.add_log(str(e).splitlines()[0])
+            elif "Остановлено пользователем" in str(e):
+                S.add_log("Остановлено.")
             else:
                 S.add_log(f"❌ {str(e).splitlines()[0][:300]}")
                 S.logged_in = False
@@ -205,14 +216,22 @@ def read_kids_lists(bot, chat: str, items: list[dict]) -> dict[str, str] | None:
         return None
     S.add_log(f"Списки детей: читаю чат MAX «{chat}» (классов: {len(need)})…")
     mx = MaxChat(bot.ctx, log=S.add_log, should_stop=lambda: S.stop_flag)
+    failure = None
     try:
         lists = mx.read_lists(chat, need)
     except Exception as e:  # noqa: BLE001
         if is_closed_error(e) or "Остановлено пользователем" in str(e):
             raise
-        S.add_log(f"   ⚠ MAX: {str(e).splitlines()[0][:300]}")
+        failure = f"Не удалось прочитать MAX: {str(e).splitlines()[0][:300]}"
         return None
     finally:
+        warnings = [*mx.warnings]
+        if failure:
+            warnings.append(failure)
+        with S.lock:
+            S.max_warnings = warnings
+        for warning in warnings:
+            S.add_log(f"   ⚠ MAX: {warning}")
         try:
             bot.page.bring_to_front()
         except Exception:  # noqa: BLE001
@@ -229,6 +248,7 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     if lists is None:
         return
     body = lists.get(class_key(it.get("klass", "")))
+    found = count_kids(body or "")
     if not body:
         S.set_row(it["id"], note="none")
         S.add_log("   Списка детей для этого класса в чате нет")
@@ -245,24 +265,39 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     progress.setdefault(name, {})["note"] = True
     save_progress(progress)
     S.set_row(it["id"], note="ok")
-    S.add_log(f"   📝 примечание: список детей ({count_kids(body)})")
+    with S.lock:
+        S.notes_n += 1
+    S.add_log(f"   📝 примечание: список детей ({found})")
 
 
 def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False):
     from amo_bot import BrowserClosed, is_closed_error
     progress = load_progress()
-    S.stop_flag = False
     S.running = True
     S.row_pipeline = pipeline
     with S.lock:
-        S.total, S.done_n, S.failed_n = len(items), 0, 0
+        S.total, S.done_n, S.failed_n, S.notes_n = len(items), 0, 0, 0
+        S.max_warnings = []
     lists = None
     if max_chat:
-        todo = [it for it in items if not progress.get(progress_key(progress, it["name"], pipeline), {}).get("note")]
+        todo = [it for it in items if not progress.get(progress_key(progress, history.progress_key(it), pipeline), {}).get("note")]
         if notes_only:
-            todo = [it for it in todo if progress.get(progress_key(progress, it["name"], pipeline), {}).get("status") == "ok"]
+            todo = [it for it in todo if progress.get(progress_key(progress, history.progress_key(it), pipeline), {}).get("status") == "ok"]
         if todo:
             lists = read_kids_lists(bot, max_chat, todo)
+            for it in todo:
+                if lists is None:
+                    S.set_row(it["id"], note="error")
+                    continue
+                expected = it.get("expectedKids")
+                if type(expected) is not int or expected < 0:
+                    continue
+                found = count_kids(lists.get(class_key(it.get("klass", "")), ""))
+                warning = None
+                if expected != found:
+                    warning = f"В таблице {expected}, в MAX {found}"
+                    S.add_log(f"   ⚠ «{it['name']}»: {warning}")
+                S.set_row(it["id"], countWarning=warning)
     errors_in_row = 0
     for n, it in enumerate(items, 1):
         if S.stop_flag:
@@ -272,7 +307,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
         name = it["name"].strip()
         contacts = [Contact(role=c["role"], name=fix_name_case(c["name"].strip()), phone=c["phone"].strip())
                     for c in it["contacts"] if c["name"].strip() or c["phone"].strip()]
-        record = progress_key(progress, name, pipeline)
+        record = progress_key(progress, history.progress_key(it), pipeline)
         prev = progress.get(record, {})
         if prev.get("status") == "uncertain":
             S.set_row(rid, status="error", error="Проверьте результат сохранения в amoCRM перед повтором")
@@ -285,8 +320,8 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                 S.failed_n += 1
             continue
         if prev.get("status") == "ok":
-            S.set_row(rid, status="skip", url=prev.get("url"), note="ok" if prev.get("note") else None)
-            if lists is not None and not record.startswith("["):
+            S.set_row(rid, status="skip", url=prev.get("url"), note="ok" if prev.get("note") else ("error" if max_chat and lists is None else None))
+            if lists is not None and not record.startswith(("[", "import-")):
                 S.add_log("Воронка старой карточки не подтверждена. Проверьте ссылку в истории.")
             elif lists is not None and not prev.get("note") and prev.get("url"):
                 S.add_log(f"[{n}/{len(items)}] «{name}» — уже создана, добавляю список детей")
@@ -368,7 +403,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                         S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
                         break
             continue
-        err = "Остановлено" if S.stop_flag else str(last_err).splitlines()[0][:300]
+        err = "Остановлено" if S.stop_flag else (str(last_err).splitlines() or ["Не удалось создать сделку"])[0][:300]
         S.set_row(rid, status="uncertain" if getattr(last_err, "uncertain_save", False) else ("partial" if state["url"] else "error"), error=err, url=state["url"])
         if getattr(last_err, "uncertain_save", False):
             S.add_log("Проверьте результат в amoCRM. Автоповтор отключён.")
@@ -384,11 +419,39 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
         if errors_in_row >= MAX_ERRORS_IN_ROW:
             S.add_log(f"❌ {MAX_ERRORS_IN_ROW} ошибки подряд — останавливаюсь. Посмотрите скриншоты в папке logs.")
             break
-    with S.lock:  # строки, до которых не дошли, больше не «в очереди»
+    clear_queued(items)
+    S.add_log(f"Готово: {'обработано' if notes_only else 'создано'} {S.done_n}, с ошибками {S.failed_n}.")
+
+
+def clear_queued(items: list[dict]):
+    """Строки, до которых не дошли (стоп, ошибка MAX, закрыли окно), больше не «в очереди»."""
+    with S.lock:
         for it in items:
             if S.rows.get(it["id"], {}).get("status") == "queued":
                 S.rows[it["id"]]["status"] = None
-    S.add_log(f"Готово: {'обработано' if notes_only else 'создано'} {S.done_n}, с ошибками {S.failed_n}.")
+
+
+def log_history(payload: dict):
+    """Итог запуска — в журнал действий таблицы в истории."""
+    hid = payload.get("history_id")
+    if not hid:
+        return
+    with S.lock:
+        done, failed, notes, total = S.done_n, S.failed_n, S.notes_n, S.total
+    if payload.get("notes_only"):
+        text = f"Списки детей в созданные: добавлено {notes} из {total}"
+    else:
+        text = f"Создание сделок ({payload.get('pipeline', '')}): готово {done} из {total}"
+        if payload.get("max_chat"):
+            text += f", списков детей {notes}"
+    if failed:
+        text += f", ошибок {failed}"
+    if S.stop_flag:
+        text += " — остановлено"
+    try:
+        history.add_action(hid, text)
+    except OSError:
+        pass
 
 
 def save_contact(bot, state):
@@ -438,6 +501,8 @@ def index():
 
 @app.post("/api/parse")
 def api_parse():
+    if S.running:
+        return jsonify(error="Дождитесь окончания работы"), 409
     f = request.files.get("file")
     if not f:
         return jsonify(error="Файл не получен"), 400
@@ -445,47 +510,66 @@ def api_parse():
     fd, tmp_name = tempfile.mkstemp(suffix=".xlsx", dir=UPLOADS)
     os.close(fd)  # на Windows открытый дескриптор не даёт потом удалить файл
     tmp = Path(tmp_name)
-    f.save(tmp)
     try:
+        f.save(tmp)
         deals, warnings = read_deals(str(tmp), None, request.form.get("school", ""))
         kind = deals[0].kind if deals else None
     except Exception as e:  # noqa: BLE001
         return jsonify(error=f"Не удалось прочитать файл: {e}"), 400
     finally:
         tmp.unlink(missing_ok=True)
-    progress = load_progress()
+    import_id = uuid.uuid4().hex
     out = []
     for i, d in enumerate(deals):
         kr = next((c for c in d.contacts if c.role in ("КР", "ВС")), None)
         rk = next((c for c in d.contacts if c.role == "РК"), None)
-        done = progress.get(progress_key(progress, d.name, request.form.get("pipeline", "")))
         out.append({
-            "id": f"r{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass, "kind": d.kind, "school": d.school,
+            "id": f"import-{import_id}-{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass, "kind": d.kind, "school": d.school,
             "kr": {"name": kr.name if kr else "", "phone": kr.phone_field if kr else ""},
             "rk": {"name": rk.name if rk else "", "phone": rk.phone_field if rk else ""},
-            "info": d.info, "refused": d.refused, "red": d.red,
-            "done": done.get("url") if done else None,
-            "note": bool(done.get("note")) if done else False,
-            "doneStatus": done.get("status") if done else None,
+            "info": d.info, "refused": d.refused, "red": d.red, "expectedKids": d.expected_kids,
+            "done": None,
+            "note": False,
+            "doneStatus": None,
         })
     with S.lock:
+        if S.running:
+            return jsonify(error="Дождитесь окончания работы"), 409
         S.rows = {}
-        if not S.running:
-            S.total = S.done_n = S.failed_n = 0
+        S.total = S.done_n = S.failed_n = S.notes_n = 0
+        S.max_warnings = []
     school = deals[0].school if deals else ""
-    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename, kind=kind or "school")
+    kind = kind or "school"
+    for d in out:
+        d["sel"] = not (d["done"] and d["doneStatus"] != "partial") and not d["refused"] and not d["red"]
+    hid = None
+    try:
+        hid = history.create({"file": f.filename, "kind": kind, "fileKind": kind, "school": school,
+                              "fileSchool": school, "prefix": "", "deals": out, "original": out,
+                              "warnings": warnings}, f"Загружен файл, строк: {len(out)}")
+    except OSError:
+        pass
+    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename, kind=kind, historyId=hid)
+
+
+def browser_option():
+    browser = (request.get_json(silent=True) or {}).get("browser", "auto")
+    return browser if browser in ("auto", "msedge", "chromium") else None
 
 
 @app.post("/api/login")
 def api_login():
     """Открыть окно amoCRM. Если оно уже открыто или идёт вход — старое закрывается, открывается новое."""
+    browser = browser_option()
+    if browser is None:
+        return jsonify(error="Неизвестный браузер"), 400
     if S.running and S.phase != "login":
         return jsonify(error="Идёт создание сделок — дождитесь окончания или нажмите «Стоп»"), 409
     if S.phase == "login":
         S.relogin = True  # прервать текущее ожидание входа
     S.stop_flag = False  # прежний «Стоп» не должен прервать новый вход
     S.running = True
-    jobs.put(("login", {}))
+    jobs.put(("login", {"browser": browser}))
     return jsonify(ok=True)
 
 
@@ -494,6 +578,9 @@ def api_run():
     if S.running:
         return jsonify(error="Уже идёт работа"), 409
     data = request.get_json(force=True)
+    browser = browser_option()
+    if browser is None:
+        return jsonify(error="Неизвестный браузер"), 400
     items = data.get("deals", [])
     if not items:
         return jsonify(error="Не выбрано ни одной сделки"), 400
@@ -504,12 +591,16 @@ def api_run():
     notes_only = bool(data.get("notesOnly"))
     if notes_only and not max_chat:
         return jsonify(error="Впишите название чата MAX со списками детей"), 400
-    for it in items:
-        S.set_row(it["id"], status="queued", error=None, note=None)
-    S.running = True
-    S.stop_flag = False
+    with S.lock:  # два быстрых нажатия не должны запустить работу дважды
+        if S.running:
+            return jsonify(error="Уже идёт работа"), 409
+        S.running = True
+        S.stop_flag = False
+        for it in items:
+            S.rows[it["id"]] = {"status": "queued"}
     jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline,
-                      "max_chat": max_chat, "notes_only": notes_only}))
+                      "max_chat": max_chat, "notes_only": notes_only, "browser": browser,
+                      "history_id": data.get("historyId") or ""}))
     return jsonify(ok=True)
 
 
@@ -537,12 +628,46 @@ def api_progress():
     return jsonify([progress.get(progress_key(progress, name, data["pipeline"]), {}) for name in data["names"]])
 
 
+@app.get("/api/history")
+def api_history():
+    return jsonify(items=history.listing(load_progress()))
+
+
+@app.get("/api/history/<hid>")
+def api_history_open(hid):
+    """Таблица из истории — продолжить работу. Отметки «создана» берутся свежие из progress.json."""
+    if S.running:
+        return jsonify(error="Дождитесь окончания или нажмите «Стоп»"), 409
+    e = history.get(hid)
+    if e is None:
+        return jsonify(error="Запись истории не найдена"), 404
+    progress = load_progress()
+    history.refresh_deals(e.get("deals"), progress)
+    history.refresh_deals(e.get("original"), progress)
+    with S.lock:
+        S.rows = {}
+        S.total = S.done_n = S.failed_n = S.notes_n = 0
+        S.max_warnings = []
+    return jsonify(entry=e)
+
+
+@app.post("/api/history/<hid>")
+def api_history_save(hid):
+    if not history.update(hid, request.get_json(force=True) or {}):
+        return jsonify(error="Запись истории не найдена"), 404
+    return jsonify(ok=True)
+
+
 @app.post("/api/forget")
 def api_forget():
-    name = request.get_json(force=True).get("name", "")
-    p = load_progress()
-    if p.pop(progress_key(p, name, request.json.get("pipeline", "")), None) is not None:
-        save_progress(p)
+    row = request.get_json(force=True)
+    with S.lock:
+        if S.running:
+            return jsonify(error="Дождитесь окончания работы"), 409
+        p = load_progress()
+        if p.pop(progress_key(p, history.progress_key(row), row.get("pipeline", "")), None) is not None:
+            save_progress(p)
+        S.rows.pop(row.get("id"), None)
     return jsonify(ok=True)
 
 
@@ -553,7 +678,8 @@ def api_status():
     with S.lock:
         return jsonify(log=S.log[-200:], rows=S.rows, running=S.running, waiting=S.waiting,
                        loggedIn=S.logged_in, phase=S.phase, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
-                       pipelines=S.pipelines, rowPipeline=getattr(S, "row_pipeline", ""), total=S.total, doneN=S.done_n, failedN=S.failed_n)
+                       pipelines=S.pipelines, rowPipeline=getattr(S,"row_pipeline",""), total=S.total, doneN=S.done_n, failedN=S.failed_n,
+                       notesN=S.notes_n, browser=S.browser_choice, maxWarnings=S.max_warnings)
 
 
 def open_ui(url: str) -> bool:
