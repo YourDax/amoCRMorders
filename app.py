@@ -541,7 +541,7 @@ def api_parse():
     school = deals[0].school if deals else ""
     kind = kind or "school"
     for d in out:
-        d["sel"] = not (d["done"] and d["doneStatus"] != "partial") and not d["refused"] and not d["red"]
+        d["sel"] = not (d["done"] and d["doneStatus"] != "partial") and not d["red"]
     hid = None
     try:
         hid = history.create({"file": f.filename, "kind": kind, "fileKind": kind, "school": school,
