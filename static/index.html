@@ -105,6 +105,8 @@ body:not(.loaded) .filebar{display:block}
 .seg button:hover:not(:disabled){color:var(--text);border-color:var(--line-2)}
 .seg button[aria-pressed=true]{background:var(--accent-weak);color:var(--accent);font-weight:600}
 .meta .seg-wrap{display:inline-flex;align-items:center;gap:8px}
+.max-count-warning{max-height:12rem;overflow:auto}
+.max-count-warning ul{margin:4px 0;padding-left:20px}
 .warn{background:var(--warn-weak);color:var(--warn);border-left:3px solid var(--warn-line);border-radius:0 var(--r) var(--r) 0;padding:7px 12px;margin-top:10px;font-size:12px}
 
 /* панель запуска */
@@ -211,6 +213,7 @@ details summary:hover{color:var(--text)}
     </div>
     <input type="file" id="file" accept=".xlsx" hidden>
     <div id="warnings"></div>
+    <div id="maxCountWarning" role="status" aria-live="polite"></div>
   </section>
 
   <!-- 2. действие -->
@@ -469,7 +472,7 @@ $("#rows").addEventListener("click", async e => {
     if(!await post("/api/forget", {id: d.id, name: d.name})) return;
     for(const list of [deals, original]){
       const x = list.find(x => x.id === d.id);
-      if(x){ x.done = null; x.doneStatus = null; x.note = false; x.sel = true; delete x._final; }
+      if(x){ x.done = null; x.doneStatus = null; x.note = false; delete x.countWarning; x.sel = true; delete x._final; }
     }
     delete S.rows[d.id];
     renderRows(); return;
@@ -507,7 +510,18 @@ $("#btnClear").onclick = () => {
   $("#drop").innerHTML = '<div class="big-t">Перетащите сюда отчёт .xlsx</div>или нажмите, чтобы выбрать файл';
   ["#meta","#actionCard","#tableCard"].forEach(s => $(s).classList.add("hidden"));
   $("#warnings").innerHTML = "";
+  renderCountWarnings();
 };
+
+function renderCountWarnings(){
+  const warnings = deals.filter(d => d.countWarning);
+  const box = $("#maxCountWarning");
+  const html = warnings.length
+    ? `<div class="warn max-count-warning"><strong>Расхождения по количеству детей в MAX</strong>
+         <ul>${warnings.map(d => `<li>${esc(d.name)} — ${esc(d.countWarning)}</li>`).join("")}</ul></div>`
+    : "";
+  if(box.innerHTML !== html) box.innerHTML = html;
+}
 
 function paintStatuses(){
   for(const d of deals){
@@ -531,12 +545,14 @@ function paintStatuses(){
     if(s.note === "ok" || (d.note && !s.status)) html += '<span class="note ok" title="В сделку добавлено примечание со списком детей из MAX">список детей ✓</span>';
     else if(s.note === "none") html += '<span class="note no" title="В чате MAX нет сообщения со списком этого класса">нет списка в MAX</span>';
     else if(s.note === "error") html += '<span class="note err" title="Подробности — в журнале">список не добавлен</span>';
-    if(s.countWarning) html += ` <span class="note no">${esc(s.countWarning)}</span>`;
+    if(Object.hasOwn(s, "countWarning")) d.countWarning = s.countWarning;
+    if(d.countWarning) html += ` <span class="note no">${esc(d.countWarning)}</span>`;
     if(isDone(d) && !S.running) html += ` <a href="#" data-forget="${esc(d.id)}">ещё раз</a>`;
     const cell = tr.querySelector(".status");
     if(cell.innerHTML !== html) cell.innerHTML = html;
     tr.classList.toggle("done", isDone(d) || s.status === "ok" || s.status === "skip");
   }
+  renderCountWarnings();
 }
 
 function selected(){ return deals.filter(d => d.sel); }

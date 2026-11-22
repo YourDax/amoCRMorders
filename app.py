@@ -224,12 +224,6 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
         return
     body = lists.get(class_key(it.get("klass", "")))
     found = count_kids(body or "")
-    expected = it.get("expectedKids")
-    warning = None
-    if type(expected) is int and expected >= 0 and expected != found:
-        warning = f"В таблице {expected}, в MAX {found}"
-        S.add_log(f"   ⚠ «{name}»: {warning}")
-    S.set_row(it["id"], countWarning=warning)
     if not body:
         S.set_row(it["id"], note="none")
         S.add_log("   Списка детей для этого класса в чате нет")
@@ -264,9 +258,19 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
             todo = [it for it in todo if progress.get(history.progress_key(it), {}).get("status") == "ok"]
         if todo:
             lists = read_kids_lists(bot, max_chat, todo)
-            if lists is None:
-                for it in todo:
+            for it in todo:
+                if lists is None:
                     S.set_row(it["id"], note="error")
+                    continue
+                expected = it.get("expectedKids")
+                if type(expected) is not int or expected < 0:
+                    continue
+                found = count_kids(lists.get(class_key(it.get("klass", "")), ""))
+                warning = None
+                if expected != found:
+                    warning = f"В таблице {expected}, в MAX {found}"
+                    S.add_log(f"   ⚠ «{it['name']}»: {warning}")
+                S.set_row(it["id"], countWarning=warning)
     errors_in_row = 0
     for n, it in enumerate(items, 1):
         if S.stop_flag:
@@ -542,8 +546,8 @@ def api_run():
             return jsonify(error="Уже идёт работа"), 409
         S.running = True
         S.stop_flag = False
-    for it in items:
-        S.set_row(it["id"], status="queued", error=None, note=None, countWarning=None)
+        for it in items:
+            S.rows[it["id"]] = {"status": "queued"}
     jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline,
                       "max_chat": max_chat, "notes_only": notes_only, "browser": browser,
                       "history_id": data.get("historyId") or ""}))
