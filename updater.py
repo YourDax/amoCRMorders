@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,6 +22,7 @@ RELEASE_DOWNLOAD = "https://github.com/YourDax/amoCRMorders/releases/download/"
 READY_ENV = "SDELKI_UPDATE_READY"
 VERSION_PATTERN = re.compile(r"[0-9]{1,5}(?:\.[0-9]{1,5}){2}")
 MAX_DOWNLOAD = 1024 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def version_parts(version):
@@ -127,7 +129,7 @@ def try_build(build, args):
     try:
         return start_and_wait(build, args)
     except (OSError, subprocess.SubprocessError) as error:
-        print(f"Не удалось запустить {build.name}: {error}")
+        logger.warning("Не удалось запустить %s: %s", build.name, error)
         return False
 
 
@@ -136,7 +138,7 @@ def remove_cached_build(build):
         if build.is_dir() and build.resolve() == build.parent.resolve() / build.name:
             shutil.rmtree(build)
     except OSError as error:
-        print(f"Не удалось убрать файлы версии {build.name}: {error}")
+        logger.warning("Не удалось убрать файлы версии %s: %s", build.name, error)
 
 
 def select_version(root, installed, args):
@@ -151,7 +153,7 @@ def select_version(root, installed, args):
     try:
         candidate = stage_release(root, previous)
     except Exception as error:
-        print(f"Обновление пропущено: {error}")
+        logger.warning("Обновление пропущено: %s", error)
         candidate = None
 
     if candidate is not None:
@@ -161,7 +163,7 @@ def select_version(root, installed, args):
                 temporary.write_text(candidate.name, encoding="ascii")
                 temporary.replace(current)
             except OSError as error:
-                print(f"Не удалось сохранить текущую версию: {error}")
+                logger.warning("Не удалось сохранить текущую версию: %s", error)
             else:
                 for cached in root.glob("*"):
                     if version_parts(cached.name) and cached.name not in {candidate.name, previous}:
@@ -170,7 +172,7 @@ def select_version(root, installed, args):
         try:
             (root / f"{candidate.name}.failed").touch()
         except OSError as error:
-            print(f"Не удалось сохранить результат обновления: {error}")
+            logger.warning("Не удалось сохранить результат обновления: %s", error)
         remove_cached_build(candidate)
 
     return previous != installed and try_build(root / previous, args)
@@ -185,7 +187,7 @@ def startup_lock(root):
         root.mkdir(parents=True, exist_ok=True)
         lock = (root / "startup.lock").open("a+b")
     except OSError as error:
-        print(f"Не удалось проверить обновление: {error}")
+        logger.warning("Не удалось проверить обновление: %s", error)
         yield None
         return
     with lock:
