@@ -15,9 +15,11 @@ import threading
 import time
 import webbrowser
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 
 import paths
+import updater
 
 # В exe без консоли sys.stdout/stderr = None: print и логи Flask упали бы — пишем их в файл
 if sys.stdout is None or sys.stderr is None:
@@ -767,19 +769,35 @@ def port_busy(port: int) -> bool:
 
 
 def main():
+    from werkzeug.serving import make_server
+
     port = int(CONFIG.get("port", 8765))
     if "--port" in sys.argv:  # для проверок рядом с уже запущенной программой
         port = int(sys.argv[sys.argv.index("--port") + 1])
     url = f"http://127.0.0.1:{port}"
-    if port_busy(port):
-        # приложение уже запущено — просто показываем его окно
-        print("Приложение уже запущено, открываю окно.")
-        if "--no-open" not in sys.argv:
-            open_ui(url)
-        return
+    ready_path = os.environ.pop(updater.READY_ENV, None) if paths.FROZEN else None
+    installed = Path(sys.executable).parent
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    check_updates = (
+        paths.FROZEN and sys.platform == "win32" and not ready_path and local_app_data
+        and installed == Path(local_app_data) / "Programs" / "SdelkiAmoCRM"
+    )
+    update_dir = paths.DATA_DIR / "updates"
+    with updater.startup_lock(update_dir) if check_updates else nullcontext(None) as locked:
+        if locked is False:
+            return
+        if port_busy(port):
+            if not ready_path and "--no-open" not in sys.argv:
+                open_ui(url)
+            return
+        if locked and updater.select_version(update_dir, paths.VERSION, sys.argv[1:]):
+            return
+        server = make_server("127.0.0.1", port, app, threaded=True)
+
     threading.Thread(target=worker, daemon=True).start()
-    # ярлыки на рабочем столе и в «Пуске» создаёт установщик (installer.iss)
     print(f"Приложение работает: {url}")
+    if ready_path:
+        Path(ready_path).touch()
     if "--no-open" not in sys.argv:
         def start_window():
             time.sleep(1.0)
@@ -788,7 +806,7 @@ def main():
             elif paths.FROZEN:
                 idle_watchdog()
         threading.Thread(target=start_window, daemon=True).start()
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    server.serve_forever()
 
 
 def idle_watchdog():
@@ -809,10 +827,12 @@ def message_box(text: str):
 
 
 if __name__ == "__main__":
+    started_by_updater = paths.FROZEN and bool(os.environ.get(updater.READY_ENV))
     try:
         main()
     except Exception as e:  # noqa: BLE001
         import traceback
         traceback.print_exc()
-        message_box(f"Не удалось запустить программу:\n{e}\n\nПодробности: {paths.LOG_DIR / 'console.log'}")
+        if not started_by_updater:
+            message_box(f"Не удалось запустить программу:\n{e}\n\nПодробности: {paths.LOG_DIR / 'console.log'}")
         raise
