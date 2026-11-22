@@ -92,6 +92,17 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(self.calls[-1], ["7а"])
         self.assertEqual(bot2.notes, [])  # для 7а в чате списка по-прежнему нет
 
+    def test_same_name_in_two_imports_and_resume_first(self):
+        first = {**item(1, "5б"), "id": "import-first-1"}
+        second = {**first, "id": "import-second-1"}
+        bot = FakeBot()
+        app.run_deals(bot, [first], False, "P")
+        app.run_deals(bot, [second], False, "P")
+        app.run_deals(bot, [first], False, "P")
+        self.assertEqual(bot.created, 2)
+        self.assertEqual(app.S.rows[first["id"]]["url"], "https://x/leads/detail/1")
+        self.assertEqual(app.S.rows[second["id"]]["url"], "https://x/leads/detail/2")
+
     def test_without_chat_no_notes(self):
         bot = FakeBot()
         app.run_deals(bot, [item(1, "5б")], False, "P", "")

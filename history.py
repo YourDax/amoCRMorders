@@ -2,7 +2,7 @@
 
 Хранится в history.json в папке данных. Запись — таблица в том виде, в каком её оставили
 (правки, галочки, префикс, тип учреждения), плюс журнал действий («Создано 5 из 6»).
-Создана ли сделка, берётся из progress.json по названию — так статус всегда свежий.
+Создана ли сделка, берётся из progress.json по идентификатору строки в отчёте. У ранее сохранённых таблиц ключом остаётся название.
 """
 
 from __future__ import annotations
@@ -86,10 +86,17 @@ def get(hid: str) -> dict | None:
         return _find(_load(), hid)
 
 
+def progress_key(row: dict) -> str:
+    rid = str(row.get("id", ""))
+    if rid.startswith("import-"):
+        return rid
+    return str(row.get("name", "")).strip()  # tables saved before isolated imports
+
+
 def refresh_deals(deals: list[dict], progress: dict) -> list[dict]:
     """Отметки «уже создана» / «список детей» из progress.json (могли измениться после сохранения)."""
     for d in deals or []:
-        done = progress.get(str(d.get("name", "")).strip())
+        done = progress.get(progress_key(d))
         d["done"] = done.get("url") if done else None
         d["doneStatus"] = done.get("status") if done else None
         d["note"] = bool(done.get("note")) if done else False
@@ -103,7 +110,7 @@ def summary(entry: dict, progress: dict) -> dict:
     deals = entry.get("deals") or []
     created = partial = pending = 0
     for d in deals:
-        st = (progress.get(str(d.get("name", "")).strip()) or {}).get("status")
+        st = (progress.get(progress_key(d)) or {}).get("status")
         if st == "ok":
             created += 1
         elif st == "partial":

@@ -113,5 +113,21 @@ class Collect(unittest.TestCase):
         self.assertEqual(merge_history(["x"], ["w"]), ["w", "x"])  # без перекрытия
 
 
+class MaxChatReading(unittest.TestCase):
+    def test_short_chat_without_scroller(self):
+        from unittest.mock import Mock
+        from max_chat import MaxChat, _BUBBLES_JS, _SCROLLER_JS
+
+        chat = MaxChat(None)
+        chat.open = Mock()
+        chat.open_chat = Mock()
+        chat.page = Mock()
+        chat.page.evaluate.side_effect = {
+            _BUBBLES_JS: ["6 Ж\u200b\n1. Пример Ребёнок"],
+            _SCROLLER_JS: False,
+        }.__getitem__
+        self.assertIn("6ж", chat.read_lists("Чат", {"6ж"}))
+
+
 if __name__ == "__main__":
     unittest.main()

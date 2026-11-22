@@ -1,10 +1,10 @@
 """Название сделки: класс без пробела и со строчной буквой («6 Ж» → «6ж»)."""
 
 import io
-import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,19 +24,18 @@ class DealName(unittest.TestCase):
         self.assertEqual(deal_name("6 Ж", "Под_18-сп1", SCHOOL, normalize=False), "6 Ж Под_18-сп1")
 
 
-class LegacyProgress(unittest.TestCase):
-    """Сделка, созданная со старым названием «6 Ж …», узнаётся и не создаётся второй раз."""
-
-    def test_parse_finds_old_name(self):
+class ImportProgress(unittest.TestCase):
+    def test_new_import_starts_fresh_and_history_resumes(self):
         import openpyxl
 
         import app
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        app.PROGRESS = Path(tmp.name) / "progress.json"
-        app.UPLOADS = Path(tmp.name) / "uploads"
         import history
-        history.FILE = Path(tmp.name) / "history.json"
+        self.enterContext(patch.object(app, "PROGRESS", Path(tmp.name) / "progress.json"))
+        self.enterContext(patch.object(app, "UPLOADS", Path(tmp.name) / "uploads"))
+        self.enterContext(patch.object(app, "S", app.State()))
+        self.enterContext(patch.object(history, "FILE", Path(tmp.name) / "history.json"))
         app.save_progress({"6 Ж Под_18-сп1": {"url": "u", "status": "ok"}})
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -46,13 +45,27 @@ class LegacyProgress(unittest.TestCase):
         ws.append(["3Б", "Петрова Ольга", "+79990000002", "", ""])
         buf = io.BytesIO()
         wb.save(buf)
-        buf.seek(0)
-        res = app.app.test_client().post("/api/parse", data={"file": (buf, "a.xlsx")})
-        deals = json.loads(res.data)["deals"]
+        client = app.app.test_client()
+
+        def upload():
+            res = client.post("/api/parse", data={"file": (io.BytesIO(buf.getvalue()), "a.xlsx")})
+            self.assertEqual(res.status_code, 200)
+            return res.get_json()
+
+        first = upload()
+        deals = first["deals"]
         self.assertEqual([d["name"] for d in deals], ["6ж Под_18-сп1", "3б Под_18-сп1"])
-        self.assertEqual((deals[0]["done"], deals[0]["sel"]), ("u", False))
-        self.assertTrue(deals[1]["sel"])
-        self.assertEqual(app.load_progress()["6ж Под_18-сп1"]["url"], "u")
+        self.assertTrue(all(d["sel"] and not d["done"] for d in deals))
+        key = history.progress_key(deals[0])
+        app.save_progress({key: {"url": "created", "status": "ok", "note": True}})
+        app.S.set_row(deals[0]["id"], status="ok", url="created")
+        second = upload()
+        self.assertNotEqual(deals[0]["id"], second["deals"][0]["id"])
+        self.assertTrue(all(d["sel"] and not d["done"] for d in second["deals"]))
+        self.assertEqual(client.get("/api/status").get_json()["rows"], {})
+        restored = client.get("/api/history/" + first["historyId"]).get_json()["entry"]["deals"]
+        self.assertEqual((restored[0]["done"], restored[0]["sel"], restored[0]["note"]), ("created", False, True))
+        self.assertTrue(restored[1]["sel"])
 
 
 if __name__ == "__main__":

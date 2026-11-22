@@ -60,6 +60,7 @@ _BUBBLES_JS = """
 # Прокручиваемый контейнер истории — ближайший предок сообщения с прокруткой.
 _SCROLLER_JS = """
 () => {
+  document.querySelectorAll('[data-kids-scroller]').forEach(el => el.removeAttribute('data-kids-scroller'));
   const b = document.querySelector('.bubble');
   let el = b && b.parentElement;
   while (el && el !== document.body) {
@@ -78,7 +79,7 @@ _SCROLL_UP_JS = """
   const el = document.querySelector('[data-kids-scroller]');
   if (!el) return null;
   const before = el.scrollTop;
-  el.scrollBy(0, -Math.max(200, el.clientHeight * 0.5));
+  el.scrollBy({top: -Math.max(1, el.clientHeight * 0.5), behavior: 'instant'});
   return {before, after: el.scrollTop, height: el.scrollHeight};
 }
 """
@@ -196,7 +197,6 @@ class MaxChat:
         search.fill("")
         search.fill(name)
         found: list[tuple[int, str]] = []
-        prev, same = None, 0
         deadline = time.time() + 8
         while time.time() < deadline:
             self._sleep(400)
@@ -213,17 +213,15 @@ class MaxChat:
             titles = [t for _, t in found]
             if any(norm_title(t) == norm_title(name) for t in titles):
                 break
-            same = same + 1 if titles == prev else 0
-            prev = titles
-            if same >= (2 if titles else 5):
-                break
         self.log(f"MAX: найдено чатов: {len(found)}" + (f" ({', '.join(t for _, t in found[:5])})" if found else ""))
         idx = pick_chat([t for _, t in found], name)
         self.page.locator(".searchResultsList > *").nth(found[idx][0]).click()
         for _ in range(20):
             self._sleep(250)
-            if self._header_title():
+            if norm_title(self._header_title()) == norm_title(found[idx][1]):
                 break
+        else:
+            raise RuntimeError("Не удалось подтвердить открытие выбранного чата MAX")
         self.log(f"MAX: открыт чат «{self._header_title() or found[idx][1]}»")
 
     def read_lists(self, chat: str, need: set[str]) -> dict[str, str]:
@@ -235,11 +233,13 @@ class MaxChat:
         self.open()
         self.open_chat(chat)
         for _ in range(40):  # сообщения подгружаются после открытия чата
-            if self.page.evaluate(_SCROLLER_JS):
+            if self.page.evaluate(_BUBBLES_JS):
                 break
             self._sleep(250)
         else:
             raise RuntimeError("В чате MAX не видно сообщений")
+        if not self.page.evaluate(_SCROLLER_JS):
+            return collect_lists(self.page.evaluate(_BUBBLES_JS))
         self.page.evaluate(_SCROLL_BOTTOM_JS)
         self._sleep(800)
         history: list[str] = []  # тексты сообщений от старых к новым
@@ -261,7 +261,7 @@ class MaxChat:
             if moved:
                 still = 0
             else:
-                h = self.page.evaluate("() => document.querySelector('[data-kids-scroller]').scrollHeight")
+                h = self.page.evaluate("() => document.querySelector('[data-kids-scroller]')?.scrollHeight")
                 still = 0 if h != pos["height"] else still + 1
                 if still >= 3:  # начало чата: прокрутка стоит и ничего не догружается
                     break

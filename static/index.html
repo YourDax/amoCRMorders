@@ -191,6 +191,7 @@ details summary:hover{color:var(--text)}
 <body>
 <header>
   <h1>Сделки в amoCRM</h1>
+  <select id="browser" aria-label="Браузер amoCRM и MAX" title="Браузер amoCRM и MAX"><option value="auto">Авто</option><option value="msedge">Edge</option><option value="chromium">Chromium</option></select>
   <button id="conn" class="status-conn" title="Открыть окно amoCRM и войти">amoCRM: войти</button>
   <div class="hist">
     <button id="histBtn" title="Прежние таблицы: продолжить работу" aria-haspopup="true" aria-expanded="false">История <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3.5l3 3 3-3"/></svg></button>
@@ -334,7 +335,7 @@ const drop = $("#drop"), fileInp = $("#file");
 drop.onclick = () => fileInp.click();
 drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
+drop.ondrop = e => { e.preventDefault(); e.stopPropagation(); drop.classList.remove("over"); if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
 fileInp.onchange = () => fileInp.files[0] && upload(fileInp.files[0]);
 // файл можно бросить в любое место окна
 document.addEventListener("dragover", e => e.preventDefault());
@@ -343,6 +344,7 @@ document.addEventListener("drop", e => { e.preventDefault(); if(e.dataTransfer.f
 async function upload(f){
   if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
   if(!/\.xlsx$/i.test(f.name)){ alert("Нужен файл .xlsx"); return; }
+  saveNow();
   const fd = new FormData(); fd.append("file", f);
   const r = await fetch("/api/parse", {method:"POST", body: fd});
   const j = await r.json();
@@ -356,6 +358,7 @@ async function upload(f){
 
 // показать таблицу: только что загруженную или из «Истории»
 function showTable(e){
+  S.rows = {}; S.total = 0;
   const strip = list => clone(list || []).map(d => { delete d._final; return d; });
   histId = e.id || null; curFile = e.file || ""; curWarnings = e.warnings || [];
   original = strip(e.original); deals = strip(e.deals); school = e.school || ""; prefix = e.prefix || "";
@@ -461,9 +464,14 @@ $("#rows").addEventListener("click", async e => {
   const forget = e.target.dataset && e.target.dataset.forget;
   if(forget){
     e.preventDefault();
-    if(!confirm(`Создать «${forget}» ещё раз? В amoCRM появится вторая такая сделка.`)) return;
-    if(!await post("/api/forget", {name: forget})) return;
-    for(const list of [deals, original]){ const x = list.find(x => x.name === forget); if(x){ x.done = null; x.doneStatus = null; x.sel = true; } }
+    const d = byId(forget);
+    if(!confirm(`Создать «${d.name}» ещё раз? В amoCRM появится вторая такая сделка.`)) return;
+    if(!await post("/api/forget", {id: d.id, name: d.name})) return;
+    for(const list of [deals, original]){
+      const x = list.find(x => x.id === d.id);
+      if(x){ x.done = null; x.doneStatus = null; x.note = false; x.sel = true; delete x._final; }
+    }
+    delete S.rows[d.id];
     renderRows(); return;
   }
   const btn = e.target.closest("button.x"); if(!btn) return;
@@ -523,7 +531,7 @@ function paintStatuses(){
     if(s.note === "ok" || (d.note && !s.status)) html += '<span class="note ok" title="В сделку добавлено примечание со списком детей из MAX">список детей ✓</span>';
     else if(s.note === "none") html += '<span class="note no" title="В чате MAX нет сообщения со списком этого класса">нет списка в MAX</span>';
     else if(s.note === "error") html += '<span class="note err" title="Подробности — в журнале">список не добавлен</span>';
-    if(isDone(d) && !s.status) html += ` <a href="#" data-forget="${esc(d.name)}">ещё раз</a>`;
+    if(isDone(d) && !S.running) html += ` <a href="#" data-forget="${esc(d.id)}">ещё раз</a>`;
     const cell = tr.querySelector(".status");
     if(cell.innerHTML !== html) cell.innerHTML = html;
     tr.classList.toggle("done", isDone(d) || s.status === "ok" || s.status === "skip");
@@ -561,7 +569,7 @@ async function run(list, notesOnly = false){
     if(!maxChat){ alert("Впишите название чата MAX со списками детей"); $("#maxChat").focus(); return; }
     if(!confirm(`Добавить списки детей из чата MAX «${maxChat}» в ${items.length} ${plural(items.length,"созданную сделку","созданные сделки","созданных сделок")}?`)) return;
     saveNow();
-    if(await post("/api/run", {deals: items, pipeline: $("#pipeline").value || "-", maxChat, notesOnly: true, historyId: histId})) poll();
+    if(await post("/api/run", {deals: items, pipeline: $("#pipeline").value || "-", maxChat, browser: $("#browser").value, notesOnly: true, historyId: histId})) poll();
     return;
   }
   if(items.some(i => !i.name)){ alert("У некоторых сделок пустое название"); return; }
@@ -574,7 +582,7 @@ async function run(list, notesOnly = false){
   if(!S.loggedIn) msg += "\n\nОткроется окно amoCRM — если попросит, войдите в аккаунт.";
   if(!confirm(msg)) return;
   saveNow();
-  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, historyId: histId})) poll();
+  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, browser: $("#browser").value, historyId: histId})) poll();
 }
 $("#btnRun").onclick = () => run(selected());
 $("#btnRetry").onclick = () => run(failedRows());
@@ -585,7 +593,10 @@ $("#maxChat").value = "";
 $("#maxChat").oninput = () => updateUI();
 $("#btnStop").onclick = () => post("/api/stop");
 $("#btnContinue").onclick = () => post("/api/continue");
-$("#conn").onclick = () => { if(S.phase !== "run") post("/api/login"); };  // старое окно amoCRM закроется
+const browserSelect = $("#browser");
+browserSelect.value = ["auto","msedge","chromium"].includes(store.get("browser")) ? store.get("browser") : "auto";
+browserSelect.onchange = () => { store.set("browser", browserSelect.value); poll(); };
+$("#conn").onclick = () => { if(S.phase !== "run") post("/api/login", {browser: browserSelect.value}); };  // старое окно amoCRM закроется
 $("#step").checked = store.get("step") === "1";
 $("#step").onchange = e => store.set("step", e.target.checked ? "1" : "0");
 
@@ -671,8 +682,10 @@ async function poll(){
   fillPipelines(S.pipelines || []);
   if(S.version) $("#ver").textContent = "версия " + S.version;
   const conn = $("#conn");
-  conn.textContent = S.loggedIn ? "amoCRM подключена" : (S.phase === "login" ? "amoCRM: вход…" : "amoCRM: войти");
-  conn.classList.toggle("on", S.loggedIn);
+  browserSelect.disabled = !!S.running;
+  const connected = S.loggedIn && S.browser === browserSelect.value;
+  conn.textContent = connected ? "amoCRM подключена" : (S.phase === "login" ? "amoCRM: вход…" : "amoCRM: войти");
+  conn.classList.toggle("on", connected);
   conn.disabled = S.phase === "run";
   conn.title = S.phase === "run" ? "Идёт создание сделок"
     : (S.loggedIn || S.phase === "login") ? "Открыть окно amoCRM заново (старое закроется)" : "Открыть окно amoCRM и войти";

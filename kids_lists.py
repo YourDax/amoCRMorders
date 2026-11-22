@@ -33,9 +33,12 @@ _INLINE_RE = re.compile(
     r"(?:\s*(?:класс\w*|кл\.?))?(?=[\s,:;.\-–])[\s,:;.\-–]+(\S.*)$", re.I)
 
 
+_INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+
+
 def class_key(text: str) -> str:
     """«6 «Б» класс» → «6б», «гр.11» → «11». Пусто, если это не похоже на класс/группу."""
-    s = str(text or "").strip().lower().replace("ё", "е")
+    s = _INVISIBLE_RE.sub("", str(text or "")).strip().lower().replace("ё", "е")
     s = _WORDS_RE.sub(" ", s)
     s = re.sub(r"[\s\-–—_.,:;\"'«»“”„()№]+", "", s)
     s = s.translate(_LATIN)
@@ -51,7 +54,7 @@ def _header_key(line: str) -> str:
 
 
 def _inline_key(line: str) -> str:
-    m = _INLINE_RE.match(line)
+    m = _INLINE_RE.match(_INVISIBLE_RE.sub("", line))
     return class_key(m.group(1) + m.group(2)) if m else ""
 
 

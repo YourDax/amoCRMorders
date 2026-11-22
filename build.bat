@@ -1,9 +1,12 @@
 @echo off
 rem Сборка: dist\SdelkiAmoCRM\ (программа) и dist\SdelkiAmoCRM-Setup.exe (установщик, если есть Inno Setup 6)
+setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
 if not exist .venv python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt pyinstaller
+.venv\Scripts\python -m pip install -r requirements.txt pyinstaller || exit /b 1
+set "PLAYWRIGHT_BROWSERS_PATH=%CD%\build\chromium-browsers"
+.venv\Scripts\python -m playwright install chromium --no-shell || exit /b 1
 .venv\Scripts\pyinstaller --noconfirm --clean SdelkiAmoCRM.spec || exit /b 1
 set ISCC="%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if exist %ISCC% (

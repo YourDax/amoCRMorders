@@ -15,7 +15,7 @@ from pathlib import Path
 from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError as PWTimeout, sync_playwright
 
 from excel_reader import Contact, Deal
-from paths import LOG_DIR, PROFILE_DIR
+from paths import LOG_DIR, PROFILE_DIR, RES_DIR
 
 SEL = {
     # левое меню и кнопка на странице сделок
@@ -60,8 +60,9 @@ STOPPED_MSG = "Остановлено пользователем"
 
 
 class AmoBot:
-    def __init__(self, base_url: str, step: bool = False, slow_mo: int = 150, timeout: int = 15000):
+    def __init__(self, base_url: str, step: bool = False, slow_mo: int = 150, timeout: int = 15000, browser: str = "auto"):
         self.base_url = base_url.rstrip("/")
+        self.browser = browser
         self.step = step
         self.slow_mo = slow_mo
         self.timeout = timeout
@@ -76,6 +77,9 @@ class AmoBot:
 
     # ---------- запуск / вход ----------
     def start(self):
+        bundled = RES_DIR / "chromium-browsers"
+        if bundled.is_dir():
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled)
         self._pw = sync_playwright().start()
         # AMO_HEADLESS=1 — без окна браузера, только для автоматических проверок
         kwargs = dict(headless=os.environ.get("AMO_HEADLESS") == "1", slow_mo=self.slow_mo,
@@ -86,19 +90,26 @@ class AmoBot:
         # Затем Chrome, затем Chromium от Playwright (если установлен).
         # У каждого браузера свой профиль: профили разных браузеров несовместимы.
         errors = []
-        for channel in ("msedge", "chrome", None):
+        choices = {"auto": ("msedge", "chrome", None), "msedge": ("msedge",), "chromium": (None,)}
+        for channel in choices[self.browser]:
             profile = PROFILE_DIR / (channel or "chromium")
             try:
                 self.ctx = self._pw.chromium.launch_persistent_context(
-                    user_data_dir=str(profile), **({"channel": channel} if channel else {}), **kwargs)
+                    user_data_dir=str(profile), channel=channel or "chromium", **kwargs)
                 break
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{channel or 'chromium'}: {str(e).splitlines()[0]}")
         else:
-            raise RuntimeError("Не удалось открыть браузер (нужен Microsoft Edge или Google Chrome). "
-                               + " | ".join(errors))
+            self._pw.stop()
+            self._pw = None
+            hint = " Для запуска из исходников установите Chromium через python -m playwright install chromium." if self.browser == "chromium" else ""
+            raise RuntimeError("Не удалось открыть браузер. " + " | ".join(errors) + hint)
         self.ctx.on("close", lambda *_: setattr(self, "_ctx_closed", True))
-        self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        self.page = next((p for p in self.ctx.pages if p.url.startswith(self.base_url + "/")), None)
+        if self.page is None:
+            self.page = next((p for p in self.ctx.pages if p.url == "about:blank"), None)
+        if self.page is None:
+            self.page = self.ctx.new_page()
         self.page.set_default_timeout(self.timeout)
 
     @property
@@ -510,15 +521,16 @@ class AmoBot:
                 if (csrf) headers['X-CSRF-Token'] = decodeURIComponent(csrf);
                 const r = await fetch(`/api/v4/leads/${id}/notes`, {method: 'POST', credentials: 'include',
                     headers, body: JSON.stringify([{note_type: 'common', params: {text}}])});
-                let body = ''; try { body = await r.text(); } catch (e) {}
-                return {status: r.status, body: body.slice(0, 300)};
+                let body; try { body = await r.json(); } catch (e) {}
+                const notes = body?._embedded?.notes ?? (Array.isArray(body) ? body : [body]);
+                return {status: r.status, saved: Array.isArray(notes) && notes.some(n => n?.id != null)};
             }""", [int(m.group(1)), text])
         except Exception as e:  # noqa: BLE001
             if is_closed_error(e):
                 raise
             self.log_cb(f"   API примечаний недоступен ({str(e).splitlines()[0][:120]}), пишу через поле")
             return False
-        if res["status"] in (200, 201) and '"id"' in res["body"]:
+        if res["status"] in (200, 201) and res["saved"]:
             return True
         self.log_cb(f"   API примечаний ответил {res['status']}, пишу через поле")
         return False
@@ -585,7 +597,9 @@ class AmoBot:
         comp.scroll_into_view_if_needed(timeout=3000)
         self._switch_to_note(comp)
         area = comp.locator('[contenteditable="true"], textarea').locator("visible=true").first
-        box = area if area.count() else comp
+        if not area.count():
+            raise RuntimeError("Не нашёл редактируемое поле примечания")
+        box = area
         box.click()
         p.keyboard.press("Control+A")  # поле могло остаться с прошлым текстом
         p.keyboard.press("Delete")
@@ -603,10 +617,9 @@ class AmoBot:
         if not btn.count():
             raise RuntimeError("Не нашёл кнопку «Добавить» у примечания")
         btn.click()
-        probe = lines[-1].strip()  # примечание добавлено — поле ввода очищается
-        end = time.time() + 10
-        while probe and probe in box.inner_text(timeout=2000):
-            if time.time() > end:
+        end = time.monotonic() + 10
+        while box.evaluate("(el) => (el.value ?? el.textContent ?? '').trim()", timeout=2000):
+            if time.monotonic() > end:
                 raise RuntimeError("Примечание не добавилось (текст остался в поле)")
             self._sleep(250)
 
