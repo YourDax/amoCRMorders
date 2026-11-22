@@ -26,6 +26,15 @@ HEADER_ALIASES = {
     "rk_name": ["фио рк"],
     "rk_phone": ["телефон рк"],
 }
+# Явный заголовок имеет приоритет над общей колонкой «Количество человек».
+_SHOT_HEADER_RE = re.compile(
+    r"^(?:(?:количество|кол[.\s-]*во)\s+)?(?:чел(?:овек)?\.?[,]?\s+)?(?:которые\s+)?"
+    r"(?:снимал(?:ось|ись)|снимавш\w*|снято|фотографировал(?:ось|ись)|фотографировавш\w*)"
+    r"(?:\s+(?:\(?чел(?:овек)?\.?\)?|детей))?\s*[:.]?$"
+)
+_COUNT_HEADER_RE = re.compile(r"^(?:количество|кол[.\s-]*во)\s+(?:чел(?:овек)?\.?|детей)\s*:?$")
+_COUNT_CELL_RE = re.compile(r"([0-9]+)(?:\s*(?:чел(?:овек)?\.?|детей))?", re.I)
+
 SCHOOL, KINDERGARTEN = "school", "kindergarten"
 LEAD_ROLE = {SCHOOL: "КР", KINDERGARTEN: "ВС"}  # первый контакт: классный руководитель / воспитатель
 # подпись учреждения в шапке листа: «Школа: ...», «ДС: ...», «Детский сад: ...», «Д/с: ...»
@@ -94,6 +103,7 @@ class Deal:
     contacts: list[Contact] = field(default_factory=list)
     info: str = ""      # «Доп.Информация / Причина отказа» из отчёта
     red: bool = False   # строка помечена в файле красным — по умолчанию не создаём
+    expected_kids: int | None = None
 
     @property
     def refused(self) -> bool:
@@ -213,6 +223,11 @@ def _find_header(ws) -> tuple[int, dict[str, int]] | None:
                 if key not in cols and any(h.startswith(pr) for pr in prefixes):
                     cols[key] = c.column
         if "class" in cols and "kr_name" in cols:
+            for pattern in (_SHOT_HEADER_RE, _COUNT_HEADER_RE):
+                col = next((c.column for c in row if pattern.fullmatch(_norm_header(c.value))), None)
+                if col is not None:
+                    cols["expected_kids"] = col
+                    break
             return row[0].row, cols
     return None
 
@@ -276,9 +291,12 @@ def read_deals(path: str, sheets: list[str] | None = None, school_override: str 
             if not school:
                 warnings.append(f"Лист «{ws.title}»: не заполнен {place_word}, строки пропущены")
                 break
-            red = any(cell_is_red(ws.cell(row=r, column=col), palette) for col in cols.values())
+            red = any(cell_is_red(ws.cell(row=r, column=col), palette)
+                      for key, col in cols.items() if key != "expected_kids")
+            number = _COUNT_CELL_RE.fullmatch(_cell_text(get(r, "expected_kids")))
+            expected_kids = int(number.group(1)) if number else None
             deal = Deal(sheet=ws.title, row=r, school=school, klass=klass, kind=kind,
-                        info=_cell_text(get(r, "info")), red=red)
+                        info=_cell_text(get(r, "info")), red=red, expected_kids=expected_kids)
             kr = _make_contact(lead, get(r, "kr_name"), get(r, "kr_phone"))
             rk = _make_contact("РК", get(r, "rk_name"), get(r, "rk_phone"))
             if kr:

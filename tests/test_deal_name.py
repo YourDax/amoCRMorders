@@ -40,9 +40,9 @@ class ImportProgress(unittest.TestCase):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.append(["Школа: Под_18-сп1"])
-        ws.append(["Класс", "ФИО КР", "Телефон КР", "ФИО РК", "Телефон РК"])
-        ws.append(["6 Ж", "Иванова Анна", "+79990000001", "", ""])
-        ws.append(["3Б", "Петрова Ольга", "+79990000002", "", ""])
+        ws.append(["Класс", "ФИО КР", "Телефон КР", "ФИО РК", "Телефон РК", "Количество человек", "Кол-во снимавшихся"])
+        ws.append(["6 Ж", "Иванова Анна", "+79990000001", "", "", 30, 12])
+        ws.append(["3Б", "Петрова Ольга", "+79990000002", "", "", 25, "0 чел."])
         buf = io.BytesIO()
         wb.save(buf)
         client = app.app.test_client()
@@ -56,6 +56,7 @@ class ImportProgress(unittest.TestCase):
         deals = first["deals"]
         self.assertEqual([d["name"] for d in deals], ["6ж Под_18-сп1", "3б Под_18-сп1"])
         self.assertTrue(all(d["sel"] and not d["done"] for d in deals))
+        self.assertEqual([d["expectedKids"] for d in deals], [12, 0])
         key = history.progress_key(deals[0])
         app.save_progress({key: {"url": "created", "status": "ok", "note": True}})
         app.S.set_row(deals[0]["id"], status="ok", url="created")
@@ -66,6 +67,7 @@ class ImportProgress(unittest.TestCase):
         restored = client.get("/api/history/" + first["historyId"]).get_json()["entry"]["deals"]
         self.assertEqual((restored[0]["done"], restored[0]["sel"], restored[0]["note"]), ("created", False, True))
         self.assertTrue(restored[1]["sel"])
+        self.assertEqual(restored[0]["expectedKids"], 12)
 
 
 if __name__ == "__main__":

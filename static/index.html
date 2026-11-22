@@ -531,6 +531,7 @@ function paintStatuses(){
     if(s.note === "ok" || (d.note && !s.status)) html += '<span class="note ok" title="В сделку добавлено примечание со списком детей из MAX">список детей ✓</span>';
     else if(s.note === "none") html += '<span class="note no" title="В чате MAX нет сообщения со списком этого класса">нет списка в MAX</span>';
     else if(s.note === "error") html += '<span class="note err" title="Подробности — в журнале">список не добавлен</span>';
+    if(s.countWarning) html += ` <span class="note no">${esc(s.countWarning)}</span>`;
     if(isDone(d) && !S.running) html += ` <a href="#" data-forget="${esc(d.id)}">ещё раз</a>`;
     const cell = tr.querySelector(".status");
     if(cell.innerHTML !== html) cell.innerHTML = html;
@@ -563,7 +564,7 @@ const plural = (n, one, few, many) => (n%10===1 && n%100!==11) ? one : (n%10>=2 
 
 // ---------- запуск ----------
 async function run(list, notesOnly = false){
-  const items = list.map(d => ({ id: d.id, name: d.name.trim(), klass: d.klass, contacts: [{role: lead(), ...d.kr}, {role:"РК", ...d.rk}] }));
+  const items = list.map(d => ({ id: d.id, name: d.name.trim(), klass: d.klass, expectedKids: d.expectedKids, contacts: [{role: lead(), ...d.kr}, {role:"РК", ...d.rk}] }));
   const maxChat = $("#maxChat").value.trim();
   if(notesOnly){
     if(!maxChat){ alert("Впишите название чата MAX со списками детей"); $("#maxChat").focus(); return; }

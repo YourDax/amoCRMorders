@@ -123,5 +123,30 @@ def merge_history(history: list[str], older: list[str]) -> list[str]:
     return older + history
 
 
+_LIST_PREFIX_RE = re.compile(r"^(?:\d{1,3}(?:\s*[.)\-–:]\s*|\s+)|[•*\-–]\s*)")
+_COUNT_COMMENT_RE = re.compile(r"^(?:идут\b|снимаются\b|список\b|всего\b|итого\b|количество\b|на\s+фотосессию\b)", re.I)
+_PERSON_RE = re.compile(r"[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*(?:\s+[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*){0,2}")
+
+
 def count_kids(body: str) -> int:
-    return max(0, len(body.split("\n")) - 1)
+    """Оценивает число детей в тексте списка, сохраняя сам текст для примечания."""
+    lines = [s.strip() for s in _INVISIBLE_RE.sub("", body).splitlines() if s.strip()]
+    if len(lines) >= 2 and not (_header_key(lines[0]) or _inline_key(lines[0])) and _inline_key(lines[1]):
+        lines = lines[1:]  # имя отправителя перед короткой записью
+    count = 0
+    for i, line in enumerate(lines):
+        if _TIME_RE.fullmatch(line) or _COUNT_COMMENT_RE.match(line):
+            continue
+        inline = _INLINE_RE.match(line)
+        if inline:
+            line = inline.group(3)
+        elif _header_key(line) and (i == 0 or not _ITEM_NO_RE.match(line)):
+            continue
+        else:
+            line = _LIST_PREFIX_RE.sub("", line)
+        line = re.sub(r"\([^)]*\)", "", line).strip()
+        for name in re.split(r"\s+и\s+|\s*[;,]\s*", line, flags=re.I):
+            name = re.sub(r"\s+\d{1,2}\s*[А-Яа-яЁёA-Za-z]$", "", name).strip(" .")
+            if _PERSON_RE.fullmatch(name):
+                count += 1
+    return count

@@ -103,6 +103,18 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(app.S.rows[first["id"]]["url"], "https://x/leads/detail/1")
         self.assertEqual(app.S.rows[second["id"]]["url"], "https://x/leads/detail/2")
 
+    def test_count_warning_does_not_stop_notes(self):
+        bot = FakeBot()
+        rows = [{**item(1, "5б"), "expectedKids": 2},
+                {**item(2, "6б"), "expectedKids": 2},
+                {**item(3, "7а"), "expectedKids": 3}]
+        app.run_deals(bot, rows, False, "P", "Чат")
+        self.assertEqual(bot.created, 3)
+        self.assertEqual(len(bot.notes), 2)
+        self.assertEqual(app.S.rows["r1"]["countWarning"], "В таблице 2, в MAX 1")
+        self.assertIsNone(app.S.rows["r2"].get("countWarning"))
+        self.assertEqual(app.S.rows["r3"]["countWarning"], "В таблице 3, в MAX 0")
+
     def test_without_chat_no_notes(self):
         bot = FakeBot()
         app.run_deals(bot, [item(1, "5б")], False, "P", "")

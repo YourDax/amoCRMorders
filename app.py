@@ -223,6 +223,13 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     if lists is None:
         return
     body = lists.get(class_key(it.get("klass", "")))
+    found = count_kids(body or "")
+    expected = it.get("expectedKids")
+    warning = None
+    if type(expected) is int and expected >= 0 and expected != found:
+        warning = f"В таблице {expected}, в MAX {found}"
+        S.add_log(f"   ⚠ «{name}»: {warning}")
+    S.set_row(it["id"], countWarning=warning)
     if not body:
         S.set_row(it["id"], note="none")
         S.add_log("   Списка детей для этого класса в чате нет")
@@ -241,7 +248,7 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     S.set_row(it["id"], note="ok")
     with S.lock:
         S.notes_n += 1
-    S.add_log(f"   📝 примечание: список детей ({count_kids(body)})")
+    S.add_log(f"   📝 примечание: список детей ({found})")
 
 
 def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False):
@@ -467,7 +474,7 @@ def api_parse():
             "id": f"import-{import_id}-{i}", "sheet": d.sheet, "row": d.row, "name": d.name, "klass": d.klass,
             "kr": {"name": kr.name if kr else "", "phone": kr.phone_field if kr else ""},
             "rk": {"name": rk.name if rk else "", "phone": rk.phone_field if rk else ""},
-            "info": d.info, "refused": d.refused, "red": d.red,
+            "info": d.info, "refused": d.refused, "red": d.red, "expectedKids": d.expected_kids,
             "done": None,
             "note": False,
             "doneStatus": None,
@@ -536,7 +543,7 @@ def api_run():
         S.running = True
         S.stop_flag = False
     for it in items:
-        S.set_row(it["id"], status="queued", error=None, note=None)
+        S.set_row(it["id"], status="queued", error=None, note=None, countWarning=None)
     jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline,
                       "max_chat": max_chat, "notes_only": notes_only, "browser": browser,
                       "history_id": data.get("historyId") or ""}))

@@ -75,9 +75,12 @@ class Messages(unittest.TestCase):
         body = parse_message(MSG_3A)[0][1]
         self.assertIn("Идут на фотосессию", body)  # лишнее не страшно
         self.assertIn("14. Козлова Серафима", body)
+        self.assertEqual(count_kids(body), 14)
         self.assertIn("Шустрова (убрать невидимки)", parse_message(MSG_3B)[0][1])
 
     def test_inline(self):
+        self.assertEqual(count_kids("София\n4в Сизинцева София"), 1)
+        self.assertEqual(count_kids("3в Антонов и Антонова 6а"), 2)
         self.assertEqual(parse_message("3в Антонов и Антонова 6а"), [("3в", "3в Антонов и Антонова 6а", False)])
         self.assertEqual(parse_message("София\n4в Сизинцева София"),
                          [("4в", "София\n4в Сизинцева София", False)])
