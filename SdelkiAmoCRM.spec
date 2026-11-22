@@ -44,9 +44,19 @@ a = Analysis(
     datas=datas,
     excludes=["tkinter", "PIL", "numpy"],
 )
+splash = Splash(
+    "assets/startup.png",
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=(28, 110),
+    text_size=-17,
+    text_font="Segoe UI",
+    text_color="#334155",
+    text_default="Запускаю программу…",
+)
 pyz = PYZ(a.pure)
 exe = EXE(
-    pyz, a.scripts, [],
+    pyz, a.scripts, splash, [],
     exclude_binaries=True,
     name="SdelkiAmoCRM",
     icon="assets/icon.ico",
@@ -54,4 +64,4 @@ exe = EXE(
     upx=False,
     version=version_info,
 )
-coll = COLLECT(exe, a.binaries, a.datas, name="SdelkiAmoCRM", upx=False)
+coll = COLLECT(exe, splash.binaries, a.binaries, a.datas, name="SdelkiAmoCRM", upx=False)

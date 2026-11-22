@@ -28,6 +28,28 @@ if sys.stdout is None or sys.stderr is None:
     sys.stdout = sys.stdout or _console
     sys.stderr = sys.stderr or _console
 
+try:
+    import pyi_splash
+except (ImportError, RuntimeError):
+    pyi_splash = None
+
+
+def startup_status(message):
+    if pyi_splash and pyi_splash.is_alive():
+        try:
+            pyi_splash.update_text(message)
+        except OSError:
+            pass
+
+
+def close_startup_window():
+    if pyi_splash and pyi_splash.is_alive():
+        try:
+            pyi_splash.close()
+        except OSError:
+            pass
+
+
 from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
 import history
@@ -790,7 +812,7 @@ def main():
             if not ready_path and "--no-open" not in sys.argv:
                 open_ui(url)
             return
-        if locked and updater.select_version(update_dir, paths.VERSION, sys.argv[1:]):
+        if locked and updater.select_version(update_dir, paths.VERSION, sys.argv[1:], startup_status):
             return
         server = make_server("127.0.0.1", port, app, threaded=True)
 
@@ -799,13 +821,20 @@ def main():
     if ready_path:
         Path(ready_path).touch()
     if "--no-open" not in sys.argv:
+        startup_status("Открываю окно программы…")
+
         def start_window():
-            time.sleep(1.0)
-            if open_ui(url):
+            try:
+                window_opened = open_ui(url)
+            finally:
+                close_startup_window()
+            if window_opened:
                 close_with_window()
             elif paths.FROZEN:
                 idle_watchdog()
         threading.Thread(target=start_window, daemon=True).start()
+    else:
+        close_startup_window()
     server.serve_forever()
 
 
@@ -831,8 +860,11 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:  # noqa: BLE001
+        close_startup_window()
         import traceback
         traceback.print_exc()
         if not started_by_updater:
             message_box(f"Не удалось запустить программу:\n{e}\n\nПодробности: {paths.LOG_DIR / 'console.log'}")
         raise
+    finally:
+        close_startup_window()

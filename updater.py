@@ -57,9 +57,11 @@ def fetch(url):
     return urlopen(Request(url, headers={"User-Agent": "SdelkiAmoCRM-updater"}), timeout=5)
 
 
-def download(asset, archive):
+def download(asset, archive, progress):
     digest = hashlib.sha256()
-    remaining = asset["size"]
+    size = remaining = asset["size"]
+    percent = 0
+    progress("Скачиваю обновление… 0%")
     deadline = time.monotonic() + 180
     with fetch(asset["browser_download_url"]) as response, archive.open("wb") as output:
         while chunk := response.read1(1024 * 1024):
@@ -68,11 +70,16 @@ def download(asset, archive):
                 raise OSError("Update download exceeded its size or time limit")
             digest.update(chunk)
             output.write(chunk)
+            downloaded = (size - remaining) * 100 // size
+            if downloaded != percent:
+                percent = downloaded
+                progress(f"Скачиваю обновление… {percent}%")
     if remaining or "sha256:" + digest.hexdigest() != asset["digest"]:
         raise OSError("Update download failed integrity verification")
 
 
-def stage_release(root, current):
+def stage_release(root, current, progress):
+    progress("Проверяю обновления…")
     with fetch(RELEASE_API) as response:
         selected = select_asset(json.loads(response.read(1024 * 1024)), current)
     if selected is None:
@@ -87,7 +94,8 @@ def stage_release(root, current):
     with tempfile.TemporaryDirectory(prefix="download-", dir=root) as directory:
         temporary = Path(directory)
         archive = temporary / UPDATE_ASSET
-        download(asset, archive)
+        download(asset, archive, progress)
+        progress("Распаковываю обновление…")
         staging = temporary / "app"
         with ZipFile(archive) as package:
             package.extractall(staging)
@@ -108,6 +116,7 @@ def start_and_wait(build, args):
             **os.environ,
             READY_ENV: str(ready),
             "PYINSTALLER_RESET_ENVIRONMENT": "1",
+            "PYINSTALLER_SUPPRESS_SPLASH_SCREEN": "1",
         }
         process = subprocess.Popen([str(executable), *args], env=environment)
         deadline = time.monotonic() + 25
@@ -141,7 +150,7 @@ def remove_cached_build(build):
         logger.warning("Не удалось убрать файлы версии %s: %s", build.name, error)
 
 
-def select_version(root, installed, args):
+def select_version(root, installed, args, progress=lambda message: None):
     current = root / "current"
     try:
         previous = current.read_text(encoding="ascii").strip()
@@ -151,12 +160,14 @@ def select_version(root, installed, args):
         previous = installed
 
     try:
-        candidate = stage_release(root, previous)
+        candidate = stage_release(root, previous, progress)
     except Exception as error:
         logger.warning("Обновление пропущено: %s", error)
+        progress("Обновление недоступно. Запускаю программу…")
         candidate = None
 
     if candidate is not None:
+        progress(f"Запускаю версию {candidate.name}…")
         if try_build(candidate, args):
             try:
                 temporary = root / "current.tmp"
@@ -173,9 +184,13 @@ def select_version(root, installed, args):
             (root / f"{candidate.name}.failed").touch()
         except OSError as error:
             logger.warning("Не удалось сохранить результат обновления: %s", error)
+        progress("Запускаю прежнюю версию…")
         remove_cached_build(candidate)
 
-    return previous != installed and try_build(root / previous, args)
+    if previous != installed:
+        progress(f"Запускаю версию {previous}…")
+        return try_build(root / previous, args)
+    return False
 
 
 @contextmanager

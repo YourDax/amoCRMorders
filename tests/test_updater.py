@@ -29,8 +29,13 @@ class StartupUpdate(unittest.TestCase):
     def test_network_failure_runs_installed_version(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.object(updater, "stage_release", side_effect=TimeoutError):
-                self.assertFalse(updater.select_version(root, "1.0.22", []))
+            statuses = []
+            with patch.object(updater, "fetch", side_effect=TimeoutError):
+                self.assertFalse(updater.select_version(root, "1.0.22", [], statuses.append))
+            self.assertEqual(statuses, [
+                "Проверяю обновления…",
+                "Обновление недоступно. Запускаю программу…",
+            ])
 
     def test_only_a_newer_release_with_verifiable_asset_is_eligible(self):
         asset = {"name": updater.UPDATE_ASSET, "size": 100, "digest": "sha256:" + "a" * 64,
@@ -67,7 +72,15 @@ class StartupUpdate(unittest.TestCase):
             with patch.object(updater, "fetch", side_effect=[
                 io.BytesIO(json.dumps(metadata).encode()), io.BytesIO(contents),
             ]), patch.object(updater, "start_and_wait", return_value=True) as start:
-                self.assertTrue(updater.select_version(root, "1.0.22", ["--no-open"]))
+                statuses = []
+                self.assertTrue(updater.select_version(root, "1.0.22", ["--no-open"], statuses.append))
+                self.assertEqual(statuses, [
+                    "Проверяю обновления…",
+                    "Скачиваю обновление… 0%",
+                    "Скачиваю обновление… 100%",
+                    "Распаковываю обновление…",
+                    "Запускаю версию 1.0.23…",
+                ])
             start.assert_called_once_with(root / "1.0.23", ["--no-open"])
             self.assertEqual((root / "current").read_text(encoding="ascii"), "1.0.23")
             self.assertEqual((root / "1.0.23" / updater.APP_EXE).read_bytes(), b"executable")
