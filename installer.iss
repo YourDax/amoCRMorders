@@ -29,6 +29,7 @@ SetupIconFile=assets\icon.ico
 UninstallDisplayIcon={app}\SdelkiAmoCRM.exe
 UninstallDisplayName=Сделки amoCRM
 Compression=lzma2/max
+LZMANumBlockThreads=2
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
