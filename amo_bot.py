@@ -457,15 +457,25 @@ class AmoBot:
         editor = focused.or_(p.locator(SEL["tag_editor"])).locator("visible=true").first
         editor.fill(tag)
 
-        option = p.locator(SEL["tag_options"]).filter(
-            has_text=exact_tag).locator("visible=true").first
+        options = p.locator(SEL["tag_options"]).locator("visible=true")
+        option = options.filter(has_text=exact_tag).first
+        create_label = re.compile(
+            r"^(?:создать|добавить)(?: новый)? т[еэ]г(?:\s*[:—–]?\s*[«\"“]?"
+            + re.escape(re.sub(r"\s+", " ", tag)) + r"[»\"”]?)?$", re.IGNORECASE
+        )
+        create = p.get_by_text(create_label).locator("visible=true").first
         if option.count():
             option.click()
-        else:
+        elif create.count():
+            create.click()
+        elif not options.count():
             editor.press("Enter")
+        else:
+            raise RuntimeError(f"amoCRM предлагает другие теги, точного варианта «{tag}» нет")
 
+        self._deal_name_input().click()
         try:
-            option.wait_for(state="hidden", timeout=self.timeout)
+            options.first.wait_for(state="hidden", timeout=self.timeout)
             chips.nth(initial_count).wait_for(state="visible", timeout=self.timeout)
         except PWTimeout as exc:
             raise RuntimeError(f"amoCRM не подтвердил добавление тега «{tag}»") from exc

@@ -220,7 +220,7 @@ details summary:hover{color:var(--text)}
   <section class="panel panel-body hidden" id="actionCard">
     <div class="action">
       <label><span class="lbl">Воронка</span> <select id="pipeline"></select></label>
-      <label title="Необязательно. Точное название беседы в MAX, например «Щ_10 - Зима 2026». Из неё в примечание каждой сделки попадёт список детей её класса (самое свежее сообщение). Пусто — сделки создаются без списков. После перезапуска программы поле пустое"><span class="lbl">Чат MAX со списками</span> <input id="maxChat" placeholder="необязательно" size="26"></label>
+      <label title="Необязательно. Точное название беседы в MAX, например «Щ_10 - Зима 2026». Из неё в примечание каждой сделки попадёт список детей её класса или группы (самое свежее сообщение). Пусто — сделки создаются без списков. После перезапуска программы поле пустое"><span class="lbl">Чат MAX со списками</span> <input id="maxChat" placeholder="необязательно" size="26"></label>
       <label title="Перед каждым «Сохранить» бот остановится, чтобы вы проверили форму"><input type="checkbox" id="step"> Проверять перед сохранением</label>
       <div class="spacer"></div>
       <button class="danger hidden" id="btnStop">Стоп</button>
@@ -588,7 +588,7 @@ function paintStatuses(){
     else if(d.done) html = '<span class="badge b-ok">уже создана</span>';
     if(url) html += ` <a href="${esc(url)}" target="_blank">открыть</a>`;
     if(s.note === "ok" || (d.note && !s.status)) html += '<span class="note ok" title="В сделку добавлено примечание со списком детей из MAX">список детей ✓</span>';
-    else if(s.note === "none") html += '<span class="note no" title="В чате MAX нет сообщения со списком этого класса">нет списка в MAX</span>';
+    else if(s.note === "none") html += '<span class="note no" title="В чате MAX нет сообщения со списком этого класса или группы">нет списка в MAX</span>';
     else if(s.note === "error") html += '<span class="note err" title="Подробности — в журнале">список не добавлен</span>';
     if(Object.hasOwn(s, "countWarning")) d.countWarning = s.countWarning;
     if(d.countWarning) html += ` <span class="note no">${esc(d.countWarning)}</span>`;
@@ -634,7 +634,7 @@ function editedClass(d){
   return match ? match[0] : d.klass;
 }
 async function run(list, notesOnly = false){
-  const items = list.map(d => ({ id: d.id, name: d.name.trim(), klass: editedClass(d), expectedKids: d.expectedKids, contacts: [{role: KIND[d.kind].lead, ...d.kr}, {role:"РК", ...d.rk}] }));
+  const items = list.map(d => ({ id: d.id, name: d.name.trim(), kind: d.kind, klass: d.kind === "kindergarten" ? d.klass : editedClass(d), expectedKids: d.expectedKids, contacts: [{role: KIND[d.kind].lead, ...d.kr}, {role:"РК", ...d.rk}] }));
   const maxChat = $("#maxChat").value.trim();
   if(notesOnly){
     if(!maxChat){ alert("Впишите название чата MAX со списками детей"); $("#maxChat").focus(); return; }

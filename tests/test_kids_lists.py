@@ -153,6 +153,32 @@ class Collect(unittest.TestCase):
         self.assertEqual(merge_history(h, ["b", "c"]), h)
 
 
+class KindergartenLists(unittest.TestCase):
+    def test_bare_group_header_and_two_children_on_one_line(self):
+        from kids_lists import group_key
+
+        key = group_key("Мечтатели")
+        rows = [f"{i}. Примерова Анна" for i in range(1, 12)]
+        rows[8] = "9. Примерова Анна и Алиса"
+        roster = "\n".join(["Мечтатели ", *rows])
+        self.assertEqual(collect_lists([roster], {key}), {key: roster.replace("Мечтатели ", "Мечтатели")})
+        self.assertEqual(full_list_keys([roster], {key}), {key})
+        self.assertEqual(count_kids(roster, {key}), 12)
+        self.assertEqual(collect_lists([roster]), {})
+
+    def test_group_headings_split_combined_message_and_support_separate_lists(self):
+        from kids_lists import group_key
+
+        keys = {group_key("Мечтатели"), group_key("Искорки")}
+        messages = ["· группа «Мечтатели» (1 чел.)\n1. Первая Анна\nГруппа «Солнышко»\n1. Чужая Вера",
+                    "Искорки группа", "1. Вторая Яна"]
+        lists = collect_lists(messages, keys)
+        self.assertEqual(full_list_keys(messages, keys) & keys, keys)
+        self.assertIn("Первая Анна", lists["мечтатели"])
+        self.assertNotIn("Чужая Вера", lists["мечтатели"])
+        self.assertEqual(lists["искорки"], "Искорки группа\n1. Вторая Яна")
+
+
 class MaxChatReading(unittest.TestCase):
     def test_journal_counts_unique_lists(self):
         from max_chat import MaxChat

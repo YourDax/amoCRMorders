@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app  # noqa: E402
 
+read_kids_lists = app.read_kids_lists
+
 
 class FakePage:
     url = "about:blank"
@@ -91,6 +93,26 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(bot2.created, 0)
         self.assertEqual(self.calls[-1], ["7а"])
         self.assertEqual(bot2.notes, [])  # для 7а в чате списка по-прежнему нет
+
+    def test_kindergarten_opens_max_and_adds_notes_to_existing_deals(self):
+        from unittest.mock import patch
+        from kids_lists import collect_lists
+
+        roster = "Мечтатели\n1. Примерова Анна и Алиса"
+        other = "Искорки\n1. Другая Вера"
+        rows = [{**item(1, "Мечтатели"), "kind": "kindergarten", "expectedKids": 2},
+                {**item(2, "Искорки"), "kind": "kindergarten", "expectedKids": 1}]
+        app.run_deals(FakeBot(), rows, False, "P")
+        bot = FakeBot()
+        with patch.object(app, "read_kids_lists", read_kids_lists), patch("max_chat.MaxChat") as max_chat:
+            max_chat.return_value.warnings = []
+            max_chat.return_value.read_lists.side_effect = lambda chat, need: collect_lists([roster, other], need)
+            app.run_deals(bot, rows, False, "P", "Детский сад", notes_only=True)
+            max_chat.return_value.read_lists.assert_called_once_with("Детский сад", {"мечтатели", "искорки"})
+        self.assertEqual(bot.created, 0)
+        self.assertEqual([text for _, text in bot.notes], [roster, other])
+        self.assertIsNone(app.S.rows["r1"].get("countWarning"))
+        self.assertIsNone(app.S.rows["r2"].get("countWarning"))
 
     def test_prefix_tag_is_added_before_first_save_only(self):
         from unittest.mock import Mock

@@ -1,4 +1,4 @@
-"""Списки детей из чата MAX: поиск сообщений с классом и сопоставление с классом сделки.
+"""Списки детей из чата MAX: сопоставление сообщений с классом или группой сделки.
 
 Сообщения в беседе пишут по-разному, правило — «лучше вставить лишнее, чем ничего»:
 
@@ -14,12 +14,13 @@
 
 Последний полный список класса заменяет прежние; короткие записи после него дописываются
 к нему. Полного списка нет — берутся все короткие записи класса.
-Для детского сада: «гр.11», «группа 11», «11 группа» → ключ «11».
+Для детского сада: «гр.11» → «11», «Группа „Мечтатели“» → «мечтатели».
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Set
 
 # латинские буквы, похожие на русские (часто печатают «5B» вместо «5В»)
 _LATIN = str.maketrans("abcehkmoptxy", "авсенкмортху")
@@ -46,25 +47,48 @@ def class_key(text: str) -> str:
     return s if _KEY_RE.match(s) else ""
 
 
+_GROUP_PREFIX = re.compile(r"^(?:гр\.\s*|(?:гр|групп[аыуе]|group)\b[\s:№.]+)", re.I)
+_GROUP_SUFFIX = re.compile(r"\s+(?:гр\.?|групп[аыуе]|group)$", re.I)
+_GROUP_NAME = re.compile(r"[\w]+(?:[\s.‑–—'-]+[\w]+)*", re.UNICODE)
+
+
+def group_key(text: str) -> str:
+    """Ключ группы из таблицы или заголовка MAX."""
+    name = _INVISIBLE_RE.sub("", str(text or "")).casefold().replace("ё", "е")
+    name = name.strip(' \t\u00a0:«»„“”"')
+    name = _GROUP_SUFFIX.sub("", _GROUP_PREFIX.sub("", name))
+    name = " ".join(name.strip(' \t\u00a0:«»„“”"№').split())
+    return class_key(name) or (name if _GROUP_NAME.fullmatch(name) else "")
+
+
 _PAREN_COUNT_RE = re.compile(
     r"^(.+?)\s*\(\s*\d{1,3}\s*(?:чел(?:овек[аи]?)?\.?|детей|ученик(?:а|ов))\s*\)",
     re.I,
 )
 
 
-def _counted_header_key(line: str) -> str:
+def _counted_header_key(line: str, need: Set[str]) -> str:
     match = _PAREN_COUNT_RE.match(line)
-    return class_key(match[1]) if match else ""
+    return _header_key(match[1], need) if match else ""
 
 
-def _header_key(line: str) -> str:
+def _header_key(line: str, need: Set[str]) -> str:
     """Ключ класса, если строка целиком — заголовок («6Б», «Список 3А:»)."""
     line = line.replace("\u200b", "").replace("\u00a0", " ").lstrip()
     line = line.removeprefix("·").lstrip()
     line = re.sub(r"^\s*(?:📋|список\s+(?:детей|учеников|участников)(?:\s+(?:для|на))?)\s*[:–—-]?\s*", "", line, flags=re.I)
     line = re.sub(r"[\s:,(–—-]*\d+\s*(?:чел(?:овек[аи]?)?\.?|дет(?:ей|и)|ученик(?:а|ов)?)\s*\)?[.:]?\s*$", "", line, flags=re.I)
     line = re.sub(r"\s*[:–—-]?\s*(?:список детей|на (?:фотосессию|съ[её]мку))\s*[:.]?$", "", line, flags=re.I)
-    return class_key(line)
+    key = class_key(line)
+    if key or not need:
+        return key
+    name = group_key(line)
+    if name in need:
+        return name
+    # Явный заголовок другой группы тоже завершает текущий список.
+    if (_GROUP_PREFIX.match(line) or _GROUP_SUFFIX.search(line)) and any(not _KEY_RE.fullmatch(k) for k in need):
+        return name
+    return ""
 
 
 def people(line: str) -> int:
@@ -82,19 +106,19 @@ def people(line: str) -> int:
     return sum(bool(re.fullmatch(r"[А-ЯЁA-Z][\w’'-]*(?:\s+[А-ЯЁA-Z][\w.’'-]*){0,3}[.]?", part.strip(), flags=re.I if marked else 0)) for part in parts)
 
 
-def _inline(line):
+def _inline(line: str, need: Set[str]):
     match = _INLINE_RE.match(line)
     if match:
         return class_key(match[1] + match[2]), match[3]
     split = re.match(r"^(.+?)\s*[:—–]\s*(\S.*)$", line)
     if split and not _ITEM_NO_RE.match(line):
-        key = _header_key(split[1])
+        key = _header_key(split[1], need)
         if key:
             return key, split[2]
     return None
 
 
-def parse_message(text: str) -> list[tuple[str, str, bool]]:
+def parse_message(text: str, need: Set[str] = frozenset()) -> list[tuple[str, str, bool]]:
     lines = [s.strip() for s in text.splitlines() if s.strip() and not _TIME_RE.match(s)]
     out = []
     key, body, evidence, full = "", [], 0, False
@@ -103,9 +127,9 @@ def parse_message(text: str) -> list[tuple[str, str, bool]]:
             body.append(line)
             evidence += people(line)
             continue
-        header = "" if re.match(r"^\d+\s*[.):]", line) else _header_key(line)
-        header = header or _counted_header_key(line)
-        inline = None if header else _inline(line)
+        header = "" if re.match(r"^\d+\s*[.):]", line) else _header_key(line, need)
+        header = header or _counted_header_key(line, need)
+        inline = None if header else _inline(line, need)
         inline_key = inline[0] if inline else ""
         if header or inline_key:
             if key and evidence:
@@ -121,13 +145,13 @@ def parse_message(text: str) -> list[tuple[str, str, bool]]:
     return out
 
 
-def _joined_lists(messages):
+def _joined_lists(messages, need: Set[str]):
     """Отдельно отправленный заголовок и непосредственно следующий нумерованный список."""
     i = 0
     while i < len(messages):
         msg = messages[i]
         i += 1
-        if _header_key(msg.strip()) and i < len(messages):
+        if _header_key(msg.strip(), need) and i < len(messages):
             following = messages[i].strip()
             if (_ITEM_NO_RE.match(following) or _BARE_ITEM_RE.match(following)
                     or re.match(r"^[•*–—-]\s+", following)):
@@ -136,16 +160,16 @@ def _joined_lists(messages):
         yield msg
 
 
-def message_lists(messages: list[str]):
+def message_lists(messages: list[str], need: Set[str] = frozenset()):
     """Разобранные списки по сообщениям, без повторов одного и того же текста."""
-    parsed = [tuple(parse_message(message)) for message in _joined_lists(messages)]
+    parsed = [tuple(parse_message(message, need)) for message in _joined_lists(messages, need)]
     return reversed(dict.fromkeys(reversed(parsed)))
 
 
-def collect_lists(messages: list[str]) -> dict[str, str]:
+def collect_lists(messages: list[str], need: Set[str] = frozenset()) -> dict[str, str]:
     """Списки по классам из сообщений чата (от старых к новым)."""
     parts: dict[str, list[str]] = {}
-    for entries in message_lists(messages):
+    for entries in message_lists(messages, need):
         for key, body, full in entries:
             if full:
                 parts[key] = [body]
@@ -154,9 +178,9 @@ def collect_lists(messages: list[str]) -> dict[str, str]:
     return {k: "\n".join(v) for k, v in parts.items()}
 
 
-def full_list_keys(messages: list[str]) -> set[str]:
+def full_list_keys(messages: list[str], need: Set[str] = frozenset()) -> set[str]:
     """Классы, у которых в этих сообщениях есть полный список (дальше в прошлое искать не нужно)."""
-    return {key for msg in _joined_lists(messages) for key, _, full in parse_message(msg) if full}
+    return {key for msg in _joined_lists(messages, need) for key, _, full in parse_message(msg, need) if full}
 
 
 def find_lists(text: str) -> list[tuple[str, str]]:
@@ -184,12 +208,12 @@ _COUNT_COMMENT_RE = re.compile(r"^(?:идут\b|снимаются\b|списо�
 _PERSON_RE = re.compile(r"[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*(?:\s+[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*){0,2}")
 
 
-def count_kids(body: str) -> int:
+def count_kids(body: str, need: Set[str] = frozenset()) -> int:
     total = 0
-    for _, block, full in parse_message(body):
+    for _, block, full in parse_message(body, need):
         started = full
         for i, line in enumerate(block.splitlines()):
-            inline = _inline(line)
+            inline = _inline(line, need)
             if not full and inline and not started:
                 total += people(inline[1])
                 started = True

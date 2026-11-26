@@ -16,7 +16,7 @@ from collections import Counter
 
 from playwright.sync_api import BrowserContext, Page
 
-from kids_lists import collect_lists, full_list_keys, merge_history, message_lists
+from kids_lists import class_key, collect_lists, full_list_keys, merge_history, message_lists
 
 MAX_URL = os.environ.get("AMO_MAX_URL", "https://web.max.ru/")  # другой адрес — только для проверок на макете
 _MAX_HOST = MAX_URL.split("://", 1)[-1].split("/", 1)[0]
@@ -249,7 +249,7 @@ class MaxChat:
         self.log(f"MAX: открыт чат «{self._header_title() or found[idx][1]}»")
 
     def read_lists(self, chat: str, need: set[str]) -> dict[str, str]:
-        """Списки детей по классам (ключ kids_lists.class_key → текст), самые новые.
+        """Последние списки детей по классам и группам.
 
         Листает историю снизу вверх, пока у всех нужных классов не найдётся полный список
         или не дойдёт до начала чата (короткие записи вида «4в Сизинцева София» тоже собираются).
@@ -275,7 +275,7 @@ class MaxChat:
             self._check_stop()
             before = len(history)
             history = merge_history(history, self._visible_messages())
-            full |= full_list_keys(history[:len(history) - before + 1])
+            full |= full_list_keys(history[:len(history) - before + 1], need)
             # полный список найден — более старые сообщения его уже не изменят
             if need and need <= full:
                 break
@@ -307,12 +307,13 @@ class MaxChat:
     def _finish_lists(self, messages: list[str], need: set[str]) -> dict[str, str]:
         counts = Counter()
         complete = set()
-        for entries in message_lists(messages):
+        for entries in message_lists(messages, need):
             counts.update({key for key, _, _ in entries if key in need})
             complete.update(key for key, _, full in entries if full)
         for key, count in sorted(counts.items()):
             if count > 1:
-                used = ("Взяли последний полный список и дополнения с классом после него."
-                        if key in complete else "Объединили короткие записи с этим классом.")
-                self.warnings.append(f"Класс {key}: найдено несколько сообщений ({count}). {used}")
-        return collect_lists(messages)
+                used = ("Взяли последний полный список и дополнения после него."
+                        if key in complete else "Объединили короткие записи из этих сообщений.")
+                label = "Класс" if class_key(key) else "Группа"
+                self.warnings.append(f"{label} {key}: найдено несколько сообщений ({count}). {used}")
+        return collect_lists(messages, need)

@@ -54,7 +54,7 @@ from flask import Flask, jsonify, request, send_from_directory  # noqa: E402
 
 import history
 from excel_reader import Contact, Deal, progress_key, fix_name_case, read_deals  # noqa: E402
-from kids_lists import class_key, count_kids  # noqa: E402
+from kids_lists import class_key, count_kids, group_key  # noqa: E402
 
 CONFIG = paths.load_config()
 if os.environ.get("AMO_URL"):  # для проверок на макете amoCRM
@@ -230,15 +230,20 @@ def worker():
 MAX_ERRORS_IN_ROW = 3  # столько ошибок подряд = что-то сломалось целиком, останавливаемся
 
 
+def roster_key(item: dict) -> str:
+    name = item.get("klass", "")
+    return group_key(name) if item.get("kind") == "kindergarten" else class_key(name)
+
+
 def read_kids_lists(bot, chat: str, items: list[dict]) -> dict[str, str] | None:
-    """Списки детей из беседы MAX по классам сделок; None — прочитать не удалось."""
+    """Списки детей из беседы MAX по классам или группам; None — прочитать не удалось."""
     from amo_bot import is_closed_error
     from max_chat import MaxChat
-    need = {class_key(it.get("klass", "")) for it in items} - {""}
+    need = {roster_key(it) for it in items} - {""}
     if not need:
-        S.add_log("Списки детей: у сделок не указан класс — MAX пропускаю.")
+        S.add_log("Списки детей: у сделок нет распознанных классов или групп. MAX пропускаю.")
         return None
-    S.add_log(f"Списки детей: читаю чат MAX «{chat}» (классов: {len(need)})…")
+    S.add_log(f"Списки детей: читаю чат MAX «{chat}» (классов и групп: {len(need)})…")
     mx = MaxChat(bot.ctx, log=S.add_log, should_stop=lambda: S.stop_flag)
     failure = None
     try:
@@ -271,11 +276,11 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     from amo_bot import is_closed_error
     if lists is None:
         return
-    body = lists.get(class_key(it.get("klass", "")))
-    found = count_kids(body or "")
+    key = roster_key(it)
+    body = lists.get(key)
     if not body:
         S.set_row(it["id"], note="none")
-        S.add_log("   Списка детей для этого класса в чате нет")
+        S.add_log("   Списка детей для класса или группы в чате нет")
         return
     try:
         bot.add_note(body)
@@ -291,7 +296,7 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     S.set_row(it["id"], note="ok")
     with S.lock:
         S.notes_n += 1
-    S.add_log(f"   📝 примечание: список детей ({found})")
+    S.add_log(f"   📝 примечание: список детей ({count_kids(body, {key})})")
 
 
 def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False, *, tag: str = ""):
@@ -316,7 +321,8 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                 expected = it.get("expectedKids")
                 if type(expected) is not int or expected < 0:
                     continue
-                found = count_kids(lists.get(class_key(it.get("klass", "")), ""))
+                key = roster_key(it)
+                found = count_kids(lists.get(key, ""), {key})
                 warning = None
                 if expected != found:
                     warning = f"В таблице {expected}, в MAX {found}"
