@@ -151,6 +151,27 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(app.S.rows["r1"]["status"], "ok")
         bot.fill_deal_tag.assert_called_once_with("НГ")
 
+    def test_two_contacts_use_the_same_card_or_reopen_it_on_failure(self):
+        from unittest.mock import Mock
+
+        row = item(1, "5б")
+        row["contacts"].append({"role": "РК", "name": "Петрова Анна", "phone": "+79990000001"})
+        for needs_retry in (False, True):
+            with self.subTest(needs_retry=needs_retry):
+                bot = FakeBot()
+                bot.open_deal = Mock(wraps=bot.open_deal)
+                bot.ui_pause = Mock()
+                bot.fill_contact = Mock(side_effect=[None, RuntimeError("Форма ещё не открылась"), None]
+                                        if needs_retry else [None, None])
+                current = {**row, "id": f"import-contacts-{needs_retry}"}
+                app.run_deals(bot, [current], True, "P")
+
+                self.assertEqual(bot.created, 1)
+                self.assertEqual(app.S.rows[current["id"]]["status"], "ok")
+                self.assertEqual(bot.open_deal.call_count, int(needs_retry))
+                self.assertEqual([call.args[0].role for call in bot.fill_contact.call_args_list],
+                                 ["КР", "РК", "РК"] if needs_retry else ["КР", "РК"])
+
     def test_same_name_in_two_imports_and_resume_first(self):
         first = {**item(1, "5б"), "id": "import-first-1"}
         second = {**first, "id": "import-second-1"}

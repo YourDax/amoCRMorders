@@ -525,11 +525,10 @@ class AmoBot:
             self.wait(300)
             return False
 
-        if has_tag():
+        if self._wait_until(persisted, min(self.timeout, 2000)):
             return
 
-        # После первого сохранения ответ API может отставать от карточки. Проверяем
-        # тег на заново открытой сделке, прежде чем пытаться добавить его повторно.
+        # Если API по-прежнему не видит тег, открываем сохранённую карточку перед исправлением.
         self.open_deal(self.deal_url())
         if self._wait_until(persisted, min(self.timeout, 2000)):
             return
@@ -558,12 +557,20 @@ class AmoBot:
         """Заполняет форму контакта. company — в поле «Название компании» (класс + школа)."""
         p = self.page
         self.check_stop()
-        name_inp = self._find_empty_contact_input()
-        if name_inp is None:
-            # пустой формы контакта нет — нажимаем «+ Добавить контакт»
-            p.get_by_text(SEL["add_contact_text"], exact=True).last.click()
-            self._sleep(700)
+        add_contact = p.get_by_text(SEL["add_contact_text"], exact=True).locator("visible=true").last
+        name_inp = None
+
+        def contact_ready(allow_add=False):
+            nonlocal name_inp
             name_inp = self._find_empty_contact_input()
+            if name_inp is not None or (allow_add and add_contact.is_visible()):
+                return True
+            self.wait(100)
+            return False
+
+        if self._wait_until(lambda: contact_ready(allow_add=True), self.timeout) and name_inp is None:
+            add_contact.click()
+            self._wait_until(contact_ready, self.timeout)
         if name_inp is None:
             raise RuntimeError("Не нашёл пустое поле «Добавить контакт»")
         form = self._contact_form(name_inp)
