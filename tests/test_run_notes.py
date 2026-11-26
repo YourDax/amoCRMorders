@@ -163,11 +163,17 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(app.S.rows[second["id"]]["url"], "https://x/leads/detail/2")
 
     def test_count_warning_does_not_stop_notes(self):
+        from unittest.mock import Mock
+
         bot = FakeBot()
+        review = Mock()
         rows = [{**item(1, "5б"), "expectedKids": 2},
                 {**item(2, "6б"), "expectedKids": 2},
                 {**item(3, "7а"), "expectedKids": 3}]
-        app.run_deals(bot, rows, False, "P", "Чат")
+        app.run_deals(bot, rows, False, "P", "Чат", review=review,
+                      input_warnings=["Проверьте номер телефона"])
+        review.assert_not_called()
+        self.assertIn("Проверьте номер телефона", app.S.run_warnings)
         self.assertEqual(bot.created, 3)
         self.assertEqual(len(bot.notes), 2)
         self.assertEqual(app.S.rows["r1"]["countWarning"], "В таблице 2, в MAX 1")
@@ -182,7 +188,8 @@ class RunNotes(unittest.TestCase):
         bot = FakeBot()
         missing = "Не найдены списки в MAX: 2д, 4е, 5и."
 
-        def review(_):
+        def review(message):
+            self.assertIn("3 из 4", message)
             status = app.app.test_client().get("/api/status").get_json()
             self.assertEqual(bot.created, 0)
             self.assertIn(missing, status["maxWarnings"])
@@ -198,6 +205,41 @@ class RunNotes(unittest.TestCase):
             hid = history.create({"file": "a.xlsx", "deals": []}, "Загружен файл")
             app.log_history({"history_id": hid, "pipeline": "P", "max_chat": "Чат"})
             self.assertIn(missing, history.get(hid)["actions"][-1]["warnings"])
+
+    def test_half_of_distinct_classes_missing_does_not_pause(self):
+        from unittest.mock import Mock
+
+        bot = FakeBot()
+        review = Mock()
+        rows = [item(1, "5б"), item(2, "2д"), item(3, "2д")]
+        rows[2]["name"] += " копия"
+        app.run_deals(bot, rows, False, "P", "Чат", review=review)
+        review.assert_not_called()
+        self.assertEqual(bot.created, 3)
+        self.assertIn("Не найдены списки в MAX: 2д.", app.S.max_warnings)
+
+    def test_only_chat_not_found_pauses_after_max_read_failure(self):
+        from unittest.mock import Mock, patch
+        from max_chat import pick_chat
+
+        for chat_missing in (True, False):
+            with self.subTest(chat_missing=chat_missing):
+                bot = FakeBot()
+                review = Mock(side_effect=lambda _: self.assertEqual(bot.created, 0))
+                row = item(1 if chat_missing else 2, "5б" if chat_missing else "6б")
+
+                with patch.object(app, "read_kids_lists", read_kids_lists), patch("max_chat.MaxChat") as max_chat:
+                    max_chat.return_value.warnings = []
+                    if chat_missing:
+                        max_chat.return_value.read_lists.side_effect = lambda chat, _: pick_chat([], chat)
+                    else:
+                        max_chat.return_value.read_lists.side_effect = RuntimeError("Не дождался входа в MAX")
+                    app.run_deals(bot, [row], False, "P", "Чат", review=review)
+
+                self.assertEqual(review.call_count, int(chat_missing))
+                self.assertEqual(bot.created, 1)
+                self.assertEqual(app.S.rows[row["id"]]["note"], "error")
+                self.assertTrue(any("Не удалось прочитать MAX" in w for w in app.S.max_warnings))
 
     def test_stopping_at_warning_review_prevents_creation(self):
         bot = FakeBot()

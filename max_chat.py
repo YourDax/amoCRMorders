@@ -119,7 +119,7 @@ def norm_title(s: str) -> str:
     return _SPACES.sub(" ", _DASHES.sub("-", s or "")).strip().casefold().replace("ё", "е")
 
 
-class _ChatNotFound(RuntimeError):
+class ChatNotFound(RuntimeError):
     pass
 
 
@@ -134,7 +134,7 @@ def pick_chat(titles: list[str], query: str) -> int:
     if len(partial) == 1:
         return partial[0]
     if not partial and not exact:
-        raise _ChatNotFound(f"Чат «{query}» не найден в MAX. Проверьте название.")
+        raise ChatNotFound(f"Чат «{query}» не найден в MAX. Проверьте название.")
     names = ", ".join(f"«{titles[i]}»" for i in (exact or partial)[:5])
     raise RuntimeError(f"По названию «{query}» в MAX несколько чатов: {names}. Впишите название точнее.")
 
@@ -248,7 +248,7 @@ class MaxChat:
         found = self._search_chats(name, name)
         try:
             idx = pick_chat([title for _, title in found], name)
-        except _ChatNotFound:
+        except ChatNotFound:
             # MAX иногда показывает чат только после поиска по началу названия.
             parts = name.split(maxsplit=1)
             if len(parts) != 2:
