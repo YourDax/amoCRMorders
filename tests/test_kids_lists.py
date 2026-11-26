@@ -148,14 +148,23 @@ class Messages(unittest.TestCase):
 
 
 class Collect(unittest.TestCase):
-    def test_latest_full_wins_and_inline_appended(self):
+    def test_class_lists_are_combined_and_inline_appended(self):
         msgs = ["5б\n1.Старый Список", "привет", "5 Б класс\n1) Новый Иван\n2) Новая Мария",
                 "5б Петров Пётр", "4в Сизинцева София", "3в Антонов и Антонова 6а", MSG_1V]
         lists = collect_lists(msgs)
-        self.assertEqual(lists["5б"], "5 Б класс\n1) Новый Иван\n2) Новая Мария\n5б Петров Пётр")
+        self.assertEqual(lists["5б"], "5 Б класс\n1. Старый Список\n2. Новый Иван\n3. Новая Мария\n5б Петров Пётр")
         self.assertEqual(lists["4в"], "4в Сизинцева София")
         self.assertEqual(lists["1в"], MSG_1V)
         self.assertEqual(full_list_keys(msgs), {"5б", "1в"})
+
+    def test_two_days_merge_without_duplicate_participants(self):
+        first = "5Г\n1. Иванова\n2. Петров\nВасилий Сидоров отказался"
+        second = "5 Г\n1. Орлов Артём\n2) петров"
+        combined = collect_lists([first, second], {"5г"})["5г"]
+
+        self.assertEqual(combined, "5 Г\n1. Иванова\n2. петров\n3. Орлов Артём\nВасилий Сидоров отказался")
+        self.assertEqual(count_kids(combined), 3)
+        self.assertEqual(count_kids(first), 2)
 
     def test_full_after_inline_replaces(self):
         self.assertEqual(collect_lists(["7а Иванов", "7а\nИванов\nПетров"])["7а"], "7а\nИванов\nПетров")
@@ -170,6 +179,11 @@ class Collect(unittest.TestCase):
 
 
 class KindergartenLists(unittest.TestCase):
+    def test_latest_full_list_replaces_older_group_list(self):
+        older = "Мечтатели\n1. Орлова Анна"
+        latest = "Мечтатели\n1. Иванова Мария"
+        self.assertEqual(collect_lists([older, latest], {"мечтатели"}), {"мечтатели": latest})
+
     def test_bare_group_header_and_two_children_on_one_line(self):
         from kids_lists import group_key
 
@@ -256,6 +270,7 @@ class MaxChatReading(unittest.TestCase):
         delayed = "1Б\n1. Примеров Пётр\n2. Иванова Анна + Иванова Вера\nДругова Мария нет"
         snapshots = iter([[first], [first], [first], [delayed, first]])
         scrollers = iter([False, True])
+        scrolls = iter([{"before": 100, "after": 25, "height": 300}, None])
 
         def evaluate(script):
             if script == _BUBBLES_JS:
@@ -265,13 +280,43 @@ class MaxChatReading(unittest.TestCase):
             if script == _SCROLL_BOTTOM_JS:
                 return None
             if script == _SCROLL_UP_JS:
-                return {"before": 100, "after": 25, "height": 300}
+                return next(scrolls)
             self.fail(f"Unexpected script: {script}")
 
         chat.page.evaluate.side_effect = evaluate
 
         self.assertEqual(chat.read_lists("Чат", {"1а", "1б"}), {"1а": first, "1б": delayed})
         chat.open_chat.assert_called_once_with("Чат")
+
+    def test_reads_second_list_on_older_screen_after_finding_class(self):
+        from unittest.mock import Mock
+        from max_chat import MaxChat, _BUBBLES_JS, _SCROLLER_JS, _SCROLL_BOTTOM_JS, _SCROLL_UP_JS
+
+        chat = MaxChat(None, log=Mock())
+        chat.open = Mock()
+        chat.open_chat = Mock(return_value=False)
+        chat._sleep = Mock()
+        chat.page = Mock()
+        older = "5Г\n1. Иванова\n2. Петров\nВасилий Сидоров отказался"
+        newer = "5Г\n1. Орлов Артём"
+        snapshots = iter([[newer], [newer], [older, newer]])
+        scrolls = iter([{"before": 100, "after": 25, "height": 300}, None])
+
+        def evaluate(script):
+            if script == _BUBBLES_JS:
+                return {"messages": next(snapshots), "hasReplies": False}
+            if script == _SCROLLER_JS:
+                return True
+            if script == _SCROLL_BOTTOM_JS:
+                return None
+            if script == _SCROLL_UP_JS:
+                return next(scrolls)
+            self.fail(f"Unexpected script: {script}")
+
+        chat.page.evaluate.side_effect = evaluate
+        body = chat.read_lists("Чат", {"5г"})["5г"]
+        self.assertEqual(body, "5Г\n1. Иванова\n2. Петров\n3. Орлов Артём\nВасилий Сидоров отказался")
+        self.assertEqual(count_kids(body), 3)
 
     def test_journal_counts_unique_lists(self):
         from max_chat import MaxChat
@@ -284,7 +329,7 @@ class MaxChatReading(unittest.TestCase):
                          {"1д": f"{roster}\n{addon}"})
         self.assertEqual(len(chat.warnings), 1)
         self.assertIn("найдено несколько сообщений (2)", chat.warnings[0])
-        self.assertIn("последний полный список", chat.warnings[0])
+        self.assertIn("Объединили списки и дополнения", chat.warnings[0])
 
     def test_short_chat_without_scroller(self):
         from unittest.mock import Mock

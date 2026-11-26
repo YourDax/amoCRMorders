@@ -16,7 +16,7 @@ from collections import Counter
 
 from playwright.sync_api import BrowserContext, Page
 
-from kids_lists import class_key, collect_lists, full_list_keys, merge_history, message_lists
+from kids_lists import class_key, collect_lists, full_list_keys, is_school_class, merge_history, message_lists
 
 MAX_URL = os.environ.get("AMO_MAX_URL", "https://web.max.ru/")  # другой адрес — только для проверок на макете
 _MAX_HOST = MAX_URL.split("://", 1)[-1].split("/", 1)[0]
@@ -268,11 +268,7 @@ class MaxChat:
         return True
 
     def read_lists(self, chat: str, need: set[str]) -> dict[str, str]:
-        """Последние списки детей по классам и группам.
-
-        Листает историю снизу вверх, пока у всех нужных классов не найдётся полный список
-        или не дойдёт до начала чата (короткие записи вида «4в Сизинцева София» тоже собираются).
-        """
+        """Читает историю чата с учётом нескольких дней съёмки школьного класса."""
         self.warnings: list[str] = []
         self._saw_replies = False
         self.open()
@@ -289,10 +285,10 @@ class MaxChat:
             # Первая порция сообщений бывает видна до готовности всей области истории.
             self.log("MAX: после открытия найдены не все списки, повторяю чтение истории.")
             self._sleep(1500)
-            retry_history, limited = self._scan_history(need)
-            lists.update(self._finish_lists(retry_history, need))
-        else:
-            lists = self._finish_lists(history, need)
+            retry_history, retry_limited = self._scan_history(need)
+            history = merge_history(history, retry_history)
+            limited = limited or retry_limited
+        lists = self._finish_lists(history, need)
         if limited:
             self.warnings.append("Достигнут предел чтения истории MAX. Списки из более ранних сообщений могли не попасть в сделки.")
         return lists
@@ -303,7 +299,8 @@ class MaxChat:
         self.page.evaluate(_SCROLL_BOTTOM_JS)
         self._sleep(800)
         history: list[str] = []  # тексты сообщений от старых к новым
-        full: set[str] = set()     # классы, у которых уже найден полный список
+        full: set[str] = set()
+        scan_all = any(is_school_class(key) for key in need)
         still = 0
         for step in range(SCROLL_MAX_STEPS):
             self._check_stop()
@@ -312,8 +309,8 @@ class MaxChat:
             full |= full_list_keys(history[:len(history) - before + 1], need)
             if len(history) > before:
                 still = 0
-            # полный список найден — более старые сообщения его уже не изменят
-            if (need and need <= full) or still >= 3:
+            # У школьного класса списки разных дней могут быть на разных экранах.
+            if still >= 3 or (not scan_all and need <= full):
                 break
             pos = self.page.evaluate(_SCROLL_UP_JS)
             if pos is None:
@@ -346,8 +343,12 @@ class MaxChat:
             complete.update(key for key, _, full in entries if full)
         for key, count in sorted(counts.items()):
             if count > 1:
-                used = ("Взяли последний полный список и дополнения после него."
-                        if key in complete else "Объединили короткие записи из этих сообщений.")
+                if key not in complete:
+                    used = "Объединили короткие записи из этих сообщений."
+                elif is_school_class(key):
+                    used = "Объединили списки и дополнения из этих сообщений."
+                else:
+                    used = "Взяли последний полный список и дополнения после него."
                 label = "Класс" if class_key(key) else "Группа"
                 self.warnings.append(f"{label} {key}: найдено несколько сообщений ({count}). {used}")
         return collect_lists(messages, need)

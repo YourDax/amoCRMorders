@@ -12,8 +12,8 @@
 * Короткая запись — класс в начале строки и сразу текст («4в Сизинцева София»): в примечание
   идёт всё сообщение.
 
-Последний полный список класса заменяет прежние; короткие записи после него дописываются
-к нему. Полного списка нет — берутся все короткие записи класса.
+Полные списки одного школьного класса объединяются: съёмка может идти в несколько дней.
+Короткие записи после первого полного списка добавляются к нему. Для групп берётся последний полный список.
 Для детского сада: «гр.11» → «11», «Группа „Мечтатели“» → «мечтатели».
 """
 
@@ -50,6 +50,10 @@ def class_key(text: str) -> str:
 _GROUP_PREFIX = re.compile(r"^(?:гр\.\s*|(?:гр|групп[аыуе]|group)\b[\s:№.]+)", re.I)
 _GROUP_SUFFIX = re.compile(r"\s+(?:гр\.?|групп[аыуе]|group)$", re.I)
 _GROUP_NAME = re.compile(r"[\w]+(?:[\s.‑–—'-]+[\w]+)*", re.UNICODE)
+
+
+def is_school_class(key: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,2}[а-я]{1,2}", key))
 
 
 def group_key(text: str) -> str:
@@ -102,7 +106,7 @@ def _header_key(line: str, need: Set[str]) -> str:
 def people(line: str) -> int:
     """Число похожих на имена записей, без пояснений и отсутствующих."""
     line = re.sub(r"\([^)]*\)", "", line).strip()
-    if re.search(r"\?|(?:^|\s)(?:нет|не будет|не будут|отсутству\w*|не прид[её]т)(?:\s|$|[.,:])", line, re.I):
+    if re.search(r"\?|(?:^|\s)(?:нет|не будет|не будут|отсутству\w*|не прид[её]т|отказ(?:ался|алась|ались))(?:\s|$|[.,:])", line, re.I):
         return 0
     if re.match(r"^(?:спасибо|здравствуйте|добрый|завтра|сегодня|готово|понятно|вопрос|итого|всего|сбор|список|привет|хорошо)\b", line, re.I):
         return 0
@@ -174,20 +178,50 @@ def message_lists(messages: list[str], need: Set[str] = frozenset()):
     return reversed(dict.fromkeys(reversed(parsed)))
 
 
+def _combine_full_lists(bodies: list[str]) -> str:
+    if len(bodies) == 1:
+        return bodies[0]
+
+    names = {}
+    comments = {}
+    for body in bodies:
+        for line in body.splitlines()[1:]:
+            if people(line):
+                name = _LIST_PREFIX_RE.sub("", line)
+                identity = re.sub(r"\([^)]*\)", "", name).strip(" .")
+                identity = " ".join(identity.casefold().replace("ё", "е").split())
+                names[identity] = name
+            else:
+                comments[line] = None
+
+    header = bodies[-1].splitlines()[0]
+    rows = [f"{number}. {name}" for number, name in enumerate(names.values(), 1)]
+    return "\n".join([header, *rows, *comments])
+
+
 def collect_lists(messages: list[str], need: Set[str] = frozenset()) -> dict[str, str]:
     """Списки по классам из сообщений чата (от старых к новым)."""
-    parts: dict[str, list[str]] = {}
+    full_lists: dict[str, list[str]] = {}
+    additions: dict[str, list[str]] = {}
     for entries in message_lists(messages, need):
         for key, body, full in entries:
             if full:
-                parts[key] = [body]
-            elif body not in parts.setdefault(key, []):
-                parts[key].append(body)
-    return {k: "\n".join(v) for k, v in parts.items()}
+                if key not in full_lists or not is_school_class(key):
+                    full_lists[key] = []
+                    additions[key] = []
+                full_lists[key].append(body)
+            elif body not in additions.setdefault(key, []):
+                additions[key].append(body)
+
+    result = {key: _combine_full_lists(bodies) for key, bodies in full_lists.items()}
+    for key, bodies in additions.items():
+        if bodies:
+            result[key] = "\n".join([result[key], *bodies] if key in result else bodies)
+    return result
 
 
 def full_list_keys(messages: list[str], need: Set[str] = frozenset()) -> set[str]:
-    """Классы, у которых в этих сообщениях есть полный список (дальше в прошлое искать не нужно)."""
+    """Классы или группы с полным списком в прочитанных сообщениях."""
     return {key for msg in _joined_lists(messages, need) for key, _, full in parse_message(msg, need) if full}
 
 
