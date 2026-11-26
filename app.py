@@ -206,7 +206,7 @@ def worker():
                     b = ensure_bot(payload["browser"])  # не вошли в amoCRM — в историю нечего писать
                     try:
                         run_deals(b, payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
-                                  payload.get("max_chat", ""), payload.get("notes_only", False))
+                                  payload.get("max_chat", ""), payload.get("notes_only", False), tag=payload["tag"])
                     finally:
                         log_history(payload)
                 finally:
@@ -294,7 +294,7 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     S.add_log(f"   📝 примечание: список детей ({found})")
 
 
-def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False):
+def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False, *, tag: str = ""):
     from amo_bot import BrowserClosed, is_closed_error
     progress = load_progress()
     S.running = True
@@ -381,7 +381,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
             if S.stop_flag:
                 break
             try:
-                create_or_resume(bot, name, contacts, pipeline, state)
+                create_or_resume(bot, name, contacts, pipeline, state, tag=tag)
                 last_err, created = None, True
                 break
             except Exception as e:  # noqa: BLE001
@@ -488,13 +488,15 @@ def save_contact(bot, state):
         raise
 
 
-def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, state: dict):
+def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, state: dict, *, tag: str = ""):
     """Создаёт сделку или дозаполняет уже сохранённую (state['url'], state['contacts_done'])."""
     if state["url"]:
         bot.open_deal(state["url"])
     else:
         bot.open_new_deal(pipeline)
         bot.fill_deal_name(name)
+        if tag:
+            bot.fill_deal_tag(tag)
     todo = contacts[state["contacts_done"]:]
     for i, c in enumerate(todo):
         if i and state.get("just_created"):
@@ -566,14 +568,15 @@ def api_parse():
     kind = kind or "school"
     for d in out:
         d["sel"] = not (d["done"] and d["doneStatus"] != "partial") and not d["red"]
-    hid = None
+    hid, prefixes = None, []
     try:
+        prefixes = history.prefixes()
         hid = history.create({"file": f.filename, "kind": kind, "fileKind": kind, "school": school,
                               "fileSchool": school, "prefix": "", "deals": out, "original": out,
                               "warnings": warnings}, f"Загружен файл, строк: {len(out)}")
     except OSError:
         pass
-    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename, kind=kind, historyId=hid)
+    return jsonify(deals=out, warnings=warnings, school=school, file=f.filename, kind=kind, historyId=hid, prefixes=prefixes)
 
 
 def browser_option():
@@ -613,6 +616,11 @@ def api_run():
         return jsonify(error="Выберите воронку"), 400
     max_chat = (data.get("maxChat") or "").strip()
     notes_only = bool(data.get("notesOnly"))
+    prefix = data.get("prefix")
+    use_tag = data.get("tagFromPrefix") is True and not notes_only
+    tag = prefix.strip() if use_tag and isinstance(prefix, str) else ""
+    if use_tag and not tag:
+        return jsonify(error="Укажите префикс для тега"), 400
     if notes_only and not max_chat:
         return jsonify(error="Впишите название чата MAX со списками детей"), 400
     with S.lock:  # два быстрых нажатия не должны запустить работу дважды
@@ -623,7 +631,7 @@ def api_run():
         for it in items:
             S.rows[it["id"]] = {"status": "queued"}
     jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline,
-                      "max_chat": max_chat, "notes_only": notes_only, "browser": browser,
+                      "max_chat": max_chat, "notes_only": notes_only, "browser": browser, "tag": tag,
                       "history_id": data.get("historyId") or ""}))
     return jsonify(ok=True)
 

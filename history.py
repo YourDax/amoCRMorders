@@ -19,7 +19,7 @@ MAX_ENTRIES = 30   # старые записи вытесняются
 MAX_ACTIONS = 50
 _lock = threading.Lock()
 # что из таблицы хранится (присылает интерфейс)
-TABLE_FIELDS = ("file", "kind", "fileKind", "school", "fileSchool", "prefix", "deals", "original", "warnings")
+TABLE_FIELDS = ("file", "kind", "fileKind", "school", "fileSchool", "prefix", "tagFromPrefix", "deals", "original", "warnings")
 
 
 def _now() -> str:
@@ -65,6 +65,12 @@ def update(hid: str, table: dict) -> bool:
         e["updated"] = _now()
         _save(entries, e)
     return True
+
+
+def prefixes() -> list[str]:
+    with _lock:
+        values = ((entry.get("prefix") or "").strip() for entry in _load())
+        return list(dict.fromkeys(value for value in values if value))
 
 
 def add_action(hid: str, text: str) -> None:

@@ -60,11 +60,16 @@ class ImportProgress(unittest.TestCase):
         key = history.progress_key(deals[0])
         app.save_progress({key: {"url": "created", "status": "ok", "note": True}})
         app.S.set_row(deals[0]["id"], status="ok", url="created")
+        saved = client.post("/api/history/" + first["historyId"], json={"prefix": "НГ", "tagFromPrefix": True})
+        self.assertEqual(saved.status_code, 200)
         second = upload()
+        self.assertEqual(second["prefixes"], ["НГ"])
         self.assertNotEqual(deals[0]["id"], second["deals"][0]["id"])
         self.assertTrue(all(d["sel"] and not d["done"] for d in second["deals"]))
         self.assertEqual(client.get("/api/status").get_json()["rows"], {})
-        restored = client.get("/api/history/" + first["historyId"]).get_json()["entry"]["deals"]
+        entry = client.get("/api/history/" + first["historyId"]).get_json()["entry"]
+        self.assertEqual((entry["prefix"], entry["tagFromPrefix"]), ("НГ", True))
+        restored = entry["deals"]
         self.assertEqual((restored[0]["done"], restored[0]["sel"], restored[0]["note"]), ("created", False, True))
         self.assertTrue(restored[1]["sel"])
         self.assertEqual(restored[0]["expectedKids"], 12)

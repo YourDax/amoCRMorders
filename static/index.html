@@ -271,6 +271,7 @@ const store = {
 };
 
 let deals = [], original = [], school = "", prefix = "", fileSchool = "", kind = "school", fileKind = "school";
+let tagFromPrefix = false, previousPrefixes = [];
 let histId = null, curFile = "", curWarnings = [];  // запись «Истории», в которую сохраняется таблица
 // школа: сделка «1а ВХТЛ-сп4», первый контакт КР; детский сад: «гр.11 1368-до4», первый контакт ВС
 const KIND = {
@@ -344,6 +345,18 @@ fileInp.onchange = () => fileInp.files[0] && upload(fileInp.files[0]);
 document.addEventListener("dragover", e => e.preventDefault());
 document.addEventListener("drop", e => { e.preventDefault(); if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); });
 
+function storedPrefixes(){
+  try{
+    const values = JSON.parse(store.get("dealPrefixes", "[]"));
+    return Array.isArray(values) ? values : [];
+  }catch(e){ return []; }
+}
+
+function updatePrefixSuggestions(){
+  const options = [...new Set([...storedPrefixes(), ...previousPrefixes])];
+  $("#prefixes").innerHTML = options.map(value => '<option value="' + esc(value) + '"></option>').join("");
+}
+
 async function upload(f){
   if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); return; }
   if(!/\.xlsx$/i.test(f.name)){ alert("Нужен файл .xlsx"); return; }
@@ -355,8 +368,14 @@ async function upload(f){
   if(!r.ok){ alert(j.error); return; }
   j.deals.forEach(d => d.sel = !isDone(d) && !d.red);
   const k = j.kind === "kindergarten" ? "kindergarten" : "school";
+  previousPrefixes = j.prefixes || [];
   showTable({id: j.historyId, file: j.file, deals: j.deals, original: j.deals, school: j.school || "",
-             fileSchool: j.school || "", prefix: "", kind: k, fileKind: k, warnings: j.warnings || []});
+             fileSchool: j.school || "", prefix: "", kind: k, fileKind: k, warnings: j.warnings || [],
+             tagFromPrefix: store.get("tagFromPrefix") === "true"});
+  lastSaved = "";
+  const lastPrefix = store.get("lastDealPrefix", previousPrefixes[0] || "");
+  if(lastPrefix) rename(school, kind, lastPrefix);
+  saveNow();
 }
 
 // показать таблицу: только что загруженную или из «Истории»
@@ -365,6 +384,7 @@ function showTable(e){
   const strip = list => clone(list || []).map(d => { d.kind ??= e.kind; d.school ??= e.school; delete d._final; return d; });
   histId = e.id || null; curFile = e.file || ""; curWarnings = e.warnings || [];
   original = strip(e.original); deals = strip(e.deals); school = e.school || ""; prefix = e.prefix || "";
+  tagFromPrefix = e.tagFromPrefix === true;
   fileSchool = e.fileSchool || ""; kind = KIND[e.kind] ? e.kind : "school"; fileKind = KIND[e.fileKind] ? e.fileKind : kind;
   const j = {file: curFile, warnings: curWarnings};
   lastSaved = histSig();
@@ -378,13 +398,30 @@ function showTable(e){
         <button type="button" data-kind="school">Школа</button><button type="button" data-kind="kindergarten">Детский сад</button>
       </span></span>
     <label><span id="placeLbl"></span> <input id="school" value="${esc(school)}" title="Поменяет название во всех сделках"></label>
-    <label title="Добавляется в начало названия всех сделок и «Названия компании», например НГ → «НГ 3в Под_18-сп1»">Префикс <input id="prefix" value="${esc(prefix)}" placeholder="например, НГ" size="10"></label>
+    <label title="Добавляется в начало названия всех сделок и «Названия компании», например НГ → «НГ 3в Под_18-сп1»">Префикс <input id="prefix" value="${esc(prefix)}" placeholder="например, НГ" size="10" list="prefixes"></label>
+    <datalist id="prefixes"></datalist>
+    <label title="Добавляет тег с префиксом при создании сделки"><input type="checkbox" id="tagFromPrefix" ${tagFromPrefix ? "checked" : ""}> Тег из префикса</label>
     <span><span id="unitsLbl"></span>: <b>${deals.length}</b></span>
     ${done ? `<span>Уже созданы: <b>${done}</b></span>` : ""}
     ${red ? `<span>Красные в файле: <b>${red}</b> (не отмечены)</span>` : ""}
     ${refused ? `<span>Похоже на отказ: <b>${refused}</b></span>` : ""}`;
   $("#school").onchange = e => rename(e.target.value.trim(), kind, prefix);
-  $("#prefix").onchange = e => rename(school, kind, e.target.value.trim());
+  updatePrefixSuggestions();
+  $("#prefix").onchange = e => {
+    if(!rename(school, kind, e.target.value.trim())) return;
+    store.set("lastDealPrefix", prefix);
+    if(prefix){
+      const recent = [prefix, ...storedPrefixes().filter(value => value !== prefix)].slice(0, 30);
+      store.set("dealPrefixes", JSON.stringify(recent));
+      updatePrefixSuggestions();
+    }
+    saveNow();
+  };
+  $("#tagFromPrefix").onchange = e => {
+    tagFromPrefix = e.target.checked;
+    store.set("tagFromPrefix", String(tagFromPrefix));
+    saveNow();
+  };
   document.querySelectorAll(".seg [data-kind]").forEach(b => b.onclick = () => rename(school, b.dataset.kind, prefix));
   applyKindUI();
   $("#warnings").innerHTML = j.warnings.length ? `<div class="warn">${j.warnings.map(esc).join("<br>")}</div>` : "";
@@ -394,7 +431,7 @@ function showTable(e){
 
 // новое название учреждения или тип: переименовать сделки, у которых название не правили вручную
 function rename(newSchool, newKind, newPrefix){
-  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); applyKindUI(); if($("#prefix")) $("#prefix").value = prefix; return; }
+  if(S.running){ alert("Дождитесь окончания или нажмите «Стоп»"); applyKindUI(); if($("#prefix")) $("#prefix").value = prefix; return false; }
   for(const d of deals){
     const place = newSchool === school ? d.school : newSchool;
     const type = newKind === kind ? d.kind : newKind;
@@ -402,7 +439,9 @@ function rename(newSchool, newKind, newPrefix){
     d.school = place; d.kind = type;
   }
   school = newSchool; kind = newKind; prefix = newPrefix;
+  $("#prefix").value = prefix;
   applyKindUI(); renderRows(); refreshProgress();
+  return true;
 }
 function applyKindUI(){
   const K = KIND[kind];
@@ -577,6 +616,7 @@ function updateUI(){
   $("#btnRetry").classList.toggle("hidden", S.running || !failedRows().length);
   $("#btnNotes").classList.toggle("hidden", S.running || !$("#maxChat").value.trim() || !noteRows().length);
   $("#histBtn").disabled = !!S.running;
+  if($("#tagFromPrefix")) $("#tagFromPrefix").disabled = S.running;
   autosave();
   const selectable = deals.filter(d => !isDone(d));
   $("#all").checked = selectable.length > 0 && selectable.every(d => d.sel);
@@ -587,7 +627,8 @@ const plural = (n, one, few, many) => (n%10===1 && n%100!==11) ? one : (n%10>=2 
 // ---------- запуск ----------
 function editedClass(d){
   let name = d.name.trim();
-  if(prefix && name.startsWith(prefix + " ")) name = name.slice(prefix.length).trim();
+  const namePrefix = prefix.replace(/\s+/g, " ");
+  if(namePrefix && name.startsWith(namePrefix + " ")) name = name.slice(namePrefix.length).trim();
   if(d.school && name.endsWith(" " + d.school)) return name.slice(0, -d.school.length).trim();
   const match = name.match(/^(?:гр(?:уппа)?\.?\s*)?\d{1,2}(?:\s*[-«"]?\s*[а-яёa-z]{1,2}[»"]?)?(?=\s|$)/i);
   return match ? match[0] : d.klass;
@@ -602,17 +643,19 @@ async function run(list, notesOnly = false){
     if(await post("/api/run", {deals: items, pipeline: $("#pipeline").value || "-", maxChat, browser: $("#browser").value, notesOnly: true, historyId: histId})) poll();
     return;
   }
+  if(tagFromPrefix && !prefix){ alert("Укажите префикс для тега или снимите галочку «Тег из префикса»"); $("#prefix").focus(); return; }
   if(items.some(i => !i.name)){ alert("У некоторых сделок пустое название"); return; }
   const pipeline = $("#pipeline").value;
   if(!pipeline){ alert("Выберите воронку"); return; }
   const bad = list.filter(d => Object.keys(problems(d)).length).length;
   let msg = `Создать ${items.length} ${plural(items.length,"сделку","сделки","сделок")} в воронке «${pipeline}»?`;
+  if(tagFromPrefix) msg += `\n\nТег сделки «${prefix}».`;
   if(bad) msg += `\n\nУ ${bad} есть замечания (подсвечены жёлтым).`;
   msg += maxChat ? `\n\nСписки детей — из чата MAX «${maxChat}».` : "\n\nЧат MAX не указан — без списков детей.";
   if(!S.loggedIn) msg += "\n\nОткроется окно amoCRM — если попросит, войдите в аккаунт.";
   if(!confirm(msg)) return;
   saveNow();
-  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, browser: $("#browser").value, historyId: histId})) poll();
+  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, prefix, tagFromPrefix, browser: $("#browser").value, historyId: histId})) poll();
 }
 $("#btnRun").onclick = () => run(selected());
 $("#btnRetry").onclick = () => run(failedRows());
@@ -660,7 +703,7 @@ $("#pipeline").onchange = e => { store.set("pipeline", e.target.value); refreshP
 
 // ---------- история таблиц ----------
 let lastSaved = "", saveTimer = null;
-const histSig = () => JSON.stringify({file: curFile, kind, fileKind, school, fileSchool, prefix, warnings: curWarnings,
+const histSig = () => JSON.stringify({file: curFile, kind, fileKind, school, fileSchool, prefix, tagFromPrefix, warnings: curWarnings,
   deals: deals.map(({_final, ...d}) => d), original: original.map(({_final, ...d}) => d)});
 function saveNow(){
   clearTimeout(saveTimer); saveTimer = null;
@@ -668,8 +711,10 @@ function saveNow(){
   const sig = histSig();
   if(sig === lastSaved) return;
   lastSaved = sig;
-  fetch(`/api/history/${histId}`, {method:"POST", headers:{"Content-Type":"application/json"}, body: sig, keepalive: true})
-    .catch(() => { lastSaved = ""; });
+  const keepalive = new TextEncoder().encode(sig).byteLength <= 60 * 1024;
+  fetch(`/api/history/${histId}`, {method:"POST", headers:{"Content-Type":"application/json"}, body: sig, keepalive})
+    .then(r => { if(!r.ok && lastSaved === sig) lastSaved = ""; })
+    .catch(() => { if(lastSaved === sig) lastSaved = ""; });
 }
 // правки, галочки, отметки «создана» — сохраняются сами через секунду после изменения
 function autosave(){

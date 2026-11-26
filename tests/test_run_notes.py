@@ -92,6 +92,22 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(self.calls[-1], ["7а"])
         self.assertEqual(bot2.notes, [])  # для 7а в чате списка по-прежнему нет
 
+    def test_prefix_tag_is_added_before_first_save_only(self):
+        from unittest.mock import Mock
+
+        bot = FakeBot()
+        calls = Mock()
+        calls.save.side_effect = bot.save
+        bot.save = calls.save
+        bot.fill_deal_tag = calls.tag
+
+        different_name = {**item(1, "5б"), "name": "Название изменили вручную"}
+        app.run_deals(bot, [different_name], False, "P", tag="Новый год")
+        app.run_deals(bot, [different_name], False, "P", tag="Новый год")
+        app.run_deals(bot, [item(2, "6б")], False, "P")
+        self.assertEqual([call[0] for call in calls.mock_calls], ["tag", "save", "save"])
+        calls.tag.assert_called_once_with("Новый год")
+
     def test_same_name_in_two_imports_and_resume_first(self):
         first = {**item(1, "5б"), "id": "import-first-1"}
         second = {**first, "id": "import-second-1"}

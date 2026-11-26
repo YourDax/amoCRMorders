@@ -25,6 +25,10 @@ SEL = {
     # название сделки в шапке карточки
     "deal_name_placeholder": re.compile(r"Сделка\s*#"),
     "deal_name_css": ['[name="lead[NAME]"]', "#person_n"],
+    # теги в шапке карточки
+    "tag_button": re.compile(r"^#\s*т[еэ]гировать$", re.IGNORECASE),
+    "tag_editor": '[class*="tags"] input:not([type="hidden"]), input[class*="tags"], [class*="tags"] [contenteditable="true"]',
+    "tag_options": '[role="option"], .tags-lib__item, .tags-lib__tag',
     # контакт
     "contact_name_placeholder": "Добавить контакт",
     "label_phone": "Раб. тел.",
@@ -439,6 +443,32 @@ class AmoBot:
         inp = self._deal_name_input()
         inp.click()
         inp.fill(name)
+
+    def fill_deal_tag(self, tag: str):
+        self.check_stop()
+        p = self.page
+        exact_tag = re.compile(r"^#?\s*" + re.escape(re.sub(r"\s+", " ", tag)) + r"$")
+        chips = p.get_by_text(exact_tag).locator("visible=true")
+        initial_count = chips.count()
+
+        button = p.get_by_text(SEL["tag_button"], exact=True).locator("visible=true").first
+        button.click()
+        focused = p.locator('input:not([type="hidden"]):not([name="lead[NAME]"]):not(#person_n):focus, [contenteditable="true"]:focus')
+        editor = focused.or_(p.locator(SEL["tag_editor"])).locator("visible=true").first
+        editor.fill(tag)
+
+        option = p.locator(SEL["tag_options"]).filter(
+            has_text=exact_tag).locator("visible=true").first
+        if option.count():
+            option.click()
+        else:
+            editor.press("Enter")
+
+        try:
+            option.wait_for(state="hidden", timeout=self.timeout)
+            chips.nth(initial_count).wait_for(state="visible", timeout=self.timeout)
+        except PWTimeout as exc:
+            raise RuntimeError(f"amoCRM не подтвердил добавление тега «{tag}»") from exc
 
     def _find_empty_contact_input(self) -> Locator | None:
         loc = self._empty_contact_name_inputs()
