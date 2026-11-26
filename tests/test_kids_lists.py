@@ -243,6 +243,36 @@ class MaxChatSearch(unittest.TestCase):
 
 
 class MaxChatReading(unittest.TestCase):
+    def test_retries_incomplete_history_after_opening_chat(self):
+        from unittest.mock import Mock
+        from max_chat import MaxChat, _BUBBLES_JS, _SCROLLER_JS, _SCROLL_BOTTOM_JS, _SCROLL_UP_JS
+
+        chat = MaxChat(None, log=Mock())
+        chat.open = Mock()
+        chat.open_chat = Mock(return_value=True)
+        chat._sleep = Mock()
+        chat.page = Mock()
+        first = "1А\n1. Орлова Анна"
+        delayed = "1Б\n1. Примеров Пётр\n2. Иванова Анна + Иванова Вера\nДругова Мария нет"
+        snapshots = iter([[first], [first], [first], [delayed, first]])
+        scrollers = iter([False, True])
+
+        def evaluate(script):
+            if script == _BUBBLES_JS:
+                return {"messages": next(snapshots), "hasReplies": False}
+            if script == _SCROLLER_JS:
+                return next(scrollers)
+            if script == _SCROLL_BOTTOM_JS:
+                return None
+            if script == _SCROLL_UP_JS:
+                return {"before": 100, "after": 25, "height": 300}
+            self.fail(f"Unexpected script: {script}")
+
+        chat.page.evaluate.side_effect = evaluate
+
+        self.assertEqual(chat.read_lists("Чат", {"1а", "1б"}), {"1а": first, "1б": delayed})
+        chat.open_chat.assert_called_once_with("Чат")
+
     def test_journal_counts_unique_lists(self):
         from max_chat import MaxChat
 

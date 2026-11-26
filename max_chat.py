@@ -88,14 +88,13 @@ _SCROLLER_JS = """
   let el = b && b.parentElement;
   while (el && el !== document.body) {
     const st = getComputedStyle(el);
-    if (/(auto|scroll)/.test(st.overflowY)) {
+    if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 1) {
       el.setAttribute('data-kids-scroller', '1');
       return true;
     }
     el = el.parentElement;
   }
-  if (b) document.body.setAttribute('data-kids-scroller', '1');
-  return !!b;
+  return false;
 }
 """
 _SCROLL_UP_JS = """
@@ -232,10 +231,10 @@ class MaxChat:
         self.log(f"MAX: найдено чатов: {len(found)}" + (f" ({', '.join(t for _, t in found[:5])})" if found else ""))
         return found
 
-    def open_chat(self, name: str):
-        """Находит чат по названию через поле «Найти» и открывает его."""
+    def open_chat(self, name: str) -> bool:
+        """Открывает чат через «Найти». Возвращает True при переходе в чат."""
         if norm_title(self._header_title()) == norm_title(name):
-            return
+            return False
         # открыт другой чат или профиль — «назад» к списку
         back = self.page.locator("button[aria-label*='назад' i]").locator("visible=true")
         if back.count():
@@ -266,6 +265,7 @@ class MaxChat:
         else:
             raise RuntimeError("Не удалось подтвердить открытие выбранного чата MAX")
         self.log(f"MAX: открыт чат «{self._header_title() or found[idx][1]}»")
+        return True
 
     def read_lists(self, chat: str, need: set[str]) -> dict[str, str]:
         """Последние списки детей по классам и группам.
@@ -276,15 +276,30 @@ class MaxChat:
         self.warnings: list[str] = []
         self._saw_replies = False
         self.open()
-        self.open_chat(chat)
+        newly_opened = self.open_chat(chat)
         for _ in range(40):  # сообщения подгружаются после открытия чата
             if self._visible_messages():
                 break
             self._sleep(250)
         else:
             raise RuntimeError("В чате MAX не видно сообщений")
+        history, limited = self._scan_history(need)
+        lists = collect_lists(history, need)
+        if newly_opened and need.difference(lists):
+            # Первая порция сообщений бывает видна до готовности всей области истории.
+            self.log("MAX: после открытия найдены не все списки, повторяю чтение истории.")
+            self._sleep(1500)
+            retry_history, limited = self._scan_history(need)
+            lists.update(self._finish_lists(retry_history, need))
+        else:
+            lists = self._finish_lists(history, need)
+        if limited:
+            self.warnings.append("Достигнут предел чтения истории MAX. Списки из более ранних сообщений могли не попасть в сделки.")
+        return lists
+
+    def _scan_history(self, need: set[str]) -> tuple[list[str], bool]:
         if not self.page.evaluate(_SCROLLER_JS):
-            return self._finish_lists(self._visible_messages(), need)
+            return self._visible_messages(), False
         self.page.evaluate(_SCROLL_BOTTOM_JS)
         self._sleep(800)
         history: list[str] = []  # тексты сообщений от старых к новым
@@ -295,8 +310,10 @@ class MaxChat:
             before = len(history)
             history = merge_history(history, self._visible_messages())
             full |= full_list_keys(history[:len(history) - before + 1], need)
+            if len(history) > before:
+                still = 0
             # полный список найден — более старые сообщения его уже не изменят
-            if need and need <= full:
+            if (need and need <= full) or still >= 3:
                 break
             pos = self.page.evaluate(_SCROLL_UP_JS)
             if pos is None:
@@ -308,13 +325,11 @@ class MaxChat:
             else:
                 h = self.page.evaluate("() => document.querySelector('[data-kids-scroller]')?.scrollHeight")
                 still = 0 if h != pos["height"] else still + 1
-                if still >= 3:  # начало чата: прокрутка стоит и ничего не догружается
-                    break
             if step and step % 20 == 0:
                 self.log(f"MAX: листаю историю… сообщений: {len(history)}, полных списков: {len(full & need)}")
         else:
-            self.warnings.append("Достигнут предел чтения истории MAX. Списки из более ранних сообщений могли не попасть в сделки.")
-        return self._finish_lists(history, need)
+            return history, True
+        return history, False
 
     def _visible_messages(self) -> list[str]:
         result = self.page.evaluate(_BUBBLES_JS)
