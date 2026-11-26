@@ -72,6 +72,13 @@ def _counted_header_key(line: str, need: Set[str]) -> str:
     return _header_key(match[1], need) if match else ""
 
 
+_PHOTO_HEADER_RE = re.compile(
+    r"^(?:участники\s+(?:[а-яё-]+\s+)*фотопроекта\s+от\s+|(?:[а-яё-]+\s+)*фотосессия\s+)"
+    r"(\d{1,2}\s*[-–—]?\s*[«\"\x27]?[а-яёa-z]{1,2}[»\"\x27]?(?:\s+класс)?)\s*[:.]?$",
+    re.I,
+)
+
+
 def _header_key(line: str, need: Set[str]) -> str:
     """Ключ класса, если строка целиком — заголовок («6Б», «Список 3А:»)."""
     line = line.replace("\u200b", "").replace("\u00a0", " ").lstrip()
@@ -79,7 +86,8 @@ def _header_key(line: str, need: Set[str]) -> str:
     line = re.sub(r"^\s*(?:📋|список\s+(?:детей|учеников|участников)(?:\s+(?:для|на))?)\s*[:–—-]?\s*", "", line, flags=re.I)
     line = re.sub(r"[\s:,(–—-]*\d+\s*(?:чел(?:овек[аи]?)?\.?|дет(?:ей|и)|ученик(?:а|ов)?)\s*\)?[.:]?\s*$", "", line, flags=re.I)
     line = re.sub(r"\s*[:–—-]?\s*(?:список детей|на (?:фотосессию|съ[её]мку))\s*[:.]?$", "", line, flags=re.I)
-    key = class_key(line)
+    photo_header = _PHOTO_HEADER_RE.fullmatch(line)
+    key = class_key(photo_header[1] if photo_header else line)
     if key or not need:
         return key
     name = group_key(line)

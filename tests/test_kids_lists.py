@@ -116,6 +116,22 @@ class Messages(unittest.TestCase):
         self.assertEqual(collect_lists([heading, rows]), {"1д": roster})
         self.assertEqual(count_kids(roster), 10)
 
+    def test_photo_project_and_session_headings(self):
+        numbered = "Участники новогоднего фотопроекта от 2Д:\n" + "\n".join(
+            f"{i}. Иванов Алексей" for i in range(1, 11)
+        )
+        unnumbered = "Зимняя фотосессия 5 И:\n" + "\n".join(
+            ["Смирнова Анна"] * 11
+        )
+        messages = [numbered, "Доброе утро\n" + unnumbered]
+        keys = {"2д", "5и"}
+
+        self.assertEqual(collect_lists(messages, keys), {"2д": numbered, "5и": unnumbered})
+        self.assertEqual(full_list_keys(messages, keys), keys)
+        self.assertEqual(count_kids(numbered), 10)
+        self.assertEqual(count_kids(unnumbered), 11)
+        self.assertEqual(parse_message("Напоминаю про фотосессию 5 И:\nЗавтра утром"), [])
+
     def test_rosters_with_siblings(self):
         only_row = "8Б\n1. Иванов Михаил с братом Иванов Максим 5В"
         several_rows = (
