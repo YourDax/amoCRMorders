@@ -160,7 +160,7 @@ def parse_message(text: str, need: Set[str] = frozenset()) -> list[tuple[str, st
             evidence += people(line)
             continue
         header = _header_key(line, need) or _counted_header_key(line, need)
-        inline = None if header else _inline(line, need)
+        inline = None if header or (full and _ITEM_NO_RE.match(line)) else _inline(line, need)
         inline_key = inline[0] if inline else ""
         if header or inline_key:
             if key and evidence:

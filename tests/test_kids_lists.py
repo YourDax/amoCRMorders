@@ -147,6 +147,11 @@ class Messages(unittest.TestCase):
         self.assertEqual(collect_lists(["Список 3А", rows, "Добрый день"], {"3а"}), {"3а": "Список 3А\n" + rows})
         self.assertEqual(collect_lists(["Список 3А", "Добрый день"], {"3а"}), {})
 
+    def test_dash_numbering_does_not_turn_short_surname_into_a_new_class(self):
+        roster = "1а\n1—Иванова Анна\n2—Ли Пётр\n3—Орлова Маша"
+        self.assertEqual(collect_lists([roster], {"1а"}), {"1а": roster})
+        self.assertEqual(count_kids(roster), 3)
+
     def test_attention_mark_and_unnamed_siblings(self):
         roster = "! 1-МА класс\n1. Иванова Анна +брат\n2. Петров Иван + брат (Возьму 2 комплекта)"
         self.assertEqual(collect_lists([roster], {"1ма"}), {"1ма": roster})
