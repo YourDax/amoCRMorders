@@ -195,6 +195,53 @@ class KindergartenLists(unittest.TestCase):
         self.assertEqual(lists["искорки"], "Искорки группа\n1. Вторая Яна")
 
 
+class MaxChatSearch(unittest.TestCase):
+    name = "1101-сп2 - Зима 2026"
+    prefix = "1101-сп2"
+
+    def setUp(self):
+        from unittest.mock import Mock
+        from max_chat import MaxChat
+
+        self.chat = MaxChat(None, log=Mock())
+        self.chat.page = Mock()
+        self.chat.page.locator.return_value.locator.return_value.count.return_value = 0
+        self.chat._open_tab_all = Mock()
+        self.chat._search_chats = Mock()
+        self.chat._sleep = Mock()
+        self.chat._header_title = Mock(side_effect=["", self.name, self.name])
+        self.results = self.chat.page.locator(".searchResultsList > *")
+        self.chat.page.locator.reset_mock()
+
+    def test_retries_by_prefix_but_opens_only_full_title(self):
+        from unittest.mock import call
+
+        self.chat._search_chats.side_effect = [[], [(0, "Архив " + self.name), (3, self.name)]]
+        self.chat.open_chat(self.name)
+        self.assertEqual(self.chat._search_chats.call_args_list, [call(self.name, self.name), call(self.prefix, self.name)])
+        self.results.nth.assert_called_once_with(3)
+        self.results.nth.return_value.click.assert_called_once()
+
+    def test_rejects_similar_or_duplicate_titles_after_retry(self):
+        for titles, error in (
+            ([(0, "Архив " + self.name)], "не найден"),
+            ([(0, self.name), (1, self.name)], "несколько чатов"),
+        ):
+            with self.subTest(titles=titles):
+                self.chat._header_title.return_value = ""
+                self.chat._header_title.side_effect = None
+                self.chat._search_chats.side_effect = [[], titles]
+                with self.assertRaisesRegex(RuntimeError, error):
+                    self.chat.open_chat(self.name)
+        self.results.nth.assert_not_called()
+
+    def test_does_not_retry_when_full_search_succeeds(self):
+        self.chat._search_chats.return_value = [(2, self.name)]
+        self.chat.open_chat(self.name)
+        self.chat._search_chats.assert_called_once_with(self.name, self.name)
+        self.results.nth.assert_called_once_with(2)
+
+
 class MaxChatReading(unittest.TestCase):
     def test_journal_counts_unique_lists(self):
         from max_chat import MaxChat

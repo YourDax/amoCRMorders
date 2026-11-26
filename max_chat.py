@@ -119,6 +119,10 @@ def norm_title(s: str) -> str:
     return _SPACES.sub(" ", _DASHES.sub("-", s or "")).strip().casefold().replace("ё", "е")
 
 
+class _ChatNotFound(RuntimeError):
+    pass
+
+
 def pick_chat(titles: list[str], query: str) -> int:
     """Индекс чата: точное совпадение названия, иначе единственный, где есть все слова запроса."""
     q = norm_title(query)
@@ -130,7 +134,7 @@ def pick_chat(titles: list[str], query: str) -> int:
     if len(partial) == 1:
         return partial[0]
     if not partial and not exact:
-        raise RuntimeError(f"Чат «{query}» не найден в MAX. Проверьте название.")
+        raise _ChatNotFound(f"Чат «{query}» не найден в MAX. Проверьте название.")
     names = ", ".join(f"«{titles[i]}»" for i in (exact or partial)[:5])
     raise RuntimeError(f"По названию «{query}» в MAX несколько чатов: {names}. Впишите название точнее.")
 
@@ -202,27 +206,15 @@ class MaxChat:
         except Exception:  # noqa: BLE001 — кнопки раздела нет, остаёмся где были
             pass
 
-    def open_chat(self, name: str):
-        """Находит чат по названию через поле «Найти» и открывает его."""
-        if norm_title(self._header_title()) == norm_title(name):
-            return
-        # открыт другой чат или профиль — «назад» к списку
-        back = self.page.locator("button[aria-label*='назад' i]").locator("visible=true")
-        if back.count():
-            try:
-                back.first.click(timeout=2000)
-                self._sleep(400)
-            except Exception:  # noqa: BLE001
-                pass
-        self._open_tab_all()
+    def _search_chats(self, query: str, name: str) -> list[tuple[int, str]]:
         search = self._visible(_SEARCH_INPUTS)
         if search is None:
             raise RuntimeError("Не нашёл поле «Найти» в MAX")
         search.fill("")
-        search.fill(name)
+        search.fill(query)
         found: list[tuple[int, str]] = []
-        deadline = time.time() + 8
-        while time.time() < deadline:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
             self._sleep(400)
             rows = self.page.evaluate(_RESULTS_JS) or []
             found = []
@@ -238,7 +230,34 @@ class MaxChat:
             if any(norm_title(t) == norm_title(name) for t in titles):
                 break
         self.log(f"MAX: найдено чатов: {len(found)}" + (f" ({', '.join(t for _, t in found[:5])})" if found else ""))
-        idx = pick_chat([t for _, t in found], name)
+        return found
+
+    def open_chat(self, name: str):
+        """Находит чат по названию через поле «Найти» и открывает его."""
+        if norm_title(self._header_title()) == norm_title(name):
+            return
+        # открыт другой чат или профиль — «назад» к списку
+        back = self.page.locator("button[aria-label*='назад' i]").locator("visible=true")
+        if back.count():
+            try:
+                back.first.click(timeout=2000)
+                self._sleep(400)
+            except Exception:  # noqa: BLE001
+                pass
+        self._open_tab_all()
+        found = self._search_chats(name, name)
+        try:
+            idx = pick_chat([title for _, title in found], name)
+        except _ChatNotFound:
+            # MAX иногда показывает чат только после поиска по началу названия.
+            parts = name.split(maxsplit=1)
+            if len(parts) != 2:
+                raise
+            prefix = parts[0]
+            self.log(f"MAX: повторяю поиск по началу названия «{prefix}».")
+            found = self._search_chats(prefix, name)
+            found = [(row, title) for row, title in found if norm_title(title) == norm_title(name)]
+            idx = pick_chat([title for _, title in found], name)
         self.page.locator(".searchResultsList > *").nth(found[idx][0]).click()
         for _ in range(20):
             self._sleep(250)
