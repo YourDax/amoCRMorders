@@ -20,6 +20,7 @@ from pathlib import Path
 
 import paths
 import updater
+import window_layout
 
 # В exe без консоли sys.stdout/stderr = None: print и логи Flask упали бы — пишем их в файл
 if sys.stdout is None or sys.stderr is None:
@@ -63,6 +64,7 @@ PROGRESS = paths.PROGRESS_FILE
 UPLOADS = paths.UPLOADS_DIR
 LOG_DIR = paths.LOG_DIR
 IDLE_EXIT_SEC = 180  # запасной вариант, если процесс окна не найден: окно молчит так долго — выходим
+_app_window = None
 WINDOW_PROFILE = paths.DATA_DIR / "app-window"  # отдельный профиль браузера для окна программы
 
 app = Flask(__name__, static_folder=str(paths.STATIC_DIR))
@@ -179,7 +181,7 @@ def worker():
         bot.log_cb = S.add_log
         bot.ui_pause = pause
         bot.should_stop = lambda: S.stop_flag
-        bot.start()
+        bot.start(split_window=sys.platform == "win32", window_reference=_app_window)
         S.browser_open = True
         S.browser_choice = browser
         bot.ensure_logged_in(wait_minutes=10, cancelled=lambda: S.relogin)
@@ -255,9 +257,9 @@ def add_run_warning(message: str, *, max_warning: bool = False) -> None:
 
 
 def read_kids_lists(bot, chat: str, items: list[dict]) -> dict[str, str] | None:
-    """Списки детей из беседы MAX по классам или группам; None — прочитать не удалось."""
+    """Списки из MAX; ChatNotFound при отсутствии чата, None при других сбоях чтения."""
     from amo_bot import is_closed_error
-    from max_chat import MaxChat
+    from max_chat import ChatNotFound, MaxChat
     need = {roster_key(it) for it in items} - {""}
     if not need:
         S.add_log("Списки детей: у сделок нет распознанных классов или групп. MAX пропускаю.")
@@ -271,6 +273,8 @@ def read_kids_lists(bot, chat: str, items: list[dict]) -> dict[str, str] | None:
         if is_closed_error(e) or "Остановлено пользователем" in str(e):
             raise
         failure = f"Не удалось прочитать MAX: {str(e).splitlines()[0][:300]}"
+        if isinstance(e, ChatNotFound):
+            raise
         return None
     finally:
         warnings = [*mx.warnings]
@@ -320,6 +324,7 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
 def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False,
               *, tag: str = "", review=None, input_warnings=()):
     from amo_bot import BrowserClosed, is_closed_error
+    from max_chat import ChatNotFound
     progress = load_progress()
     S.running = True
     S.row_pipeline = pipeline
@@ -328,6 +333,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
         S.max_warnings = []
         S.run_warnings = list(input_warnings)
     lists = None
+    review_reason = None
     previous = {}
     for it in items:
         record = progress_key(progress, history.progress_key(it), pipeline)
@@ -352,7 +358,10 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
         if todo:
             readable = [it for it in todo if roster_key(it)]
             if readable:
-                lists = read_kids_lists(bot, max_chat, readable)
+                try:
+                    lists = read_kids_lists(bot, max_chat, readable)
+                except ChatNotFound:
+                    review_reason = "Чат не найден в MAX."
             missing = set()
             for it in todo:
                 key = roster_key(it)
@@ -377,9 +386,12 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                     add_run_warning(f"{it['name']} — {warning}", max_warning=True)
             if missing:
                 add_run_warning(f"Не найдены списки в MAX: {', '.join(sorted(missing))}.", max_warning=True)
-    if review and not S.stop_flag and (S.max_warnings or S.run_warnings):
+                requested = {roster_key(it) for it in readable}
+                if len(missing) * 2 > len(requested):
+                    review_reason = f"В MAX не найдены списки для {len(missing)} из {len(requested)} классов и групп."
+    if review and not S.stop_flag and review_reason:
         action = "добавлять списки детей" if notes_only else "создавать сделки"
-        review(f"Проверьте предупреждения выше. Нажмите «Продолжить», чтобы {action}, или «Стоп» для отмены.")
+        review(f"{review_reason} Нажмите «Продолжить», чтобы {action}, или «Стоп» для отмены.")
     errors_in_row = 0
     for n, it in enumerate(items, 1):
         if S.stop_flag:
@@ -812,6 +824,8 @@ def open_ui(url: str) -> bool:
     Окно запускается в своём профиле браузера, поэтому у него свой процесс: он живёт,
     пока открыто окно, и по нему программа понимает, что её закрыли (см. close_with_window).
     Если Edge/Chrome не найдены — обычной вкладкой браузера (возвращает False)."""
+    global _app_window
+
     import subprocess
     candidates = [
         os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
@@ -823,9 +837,11 @@ def open_ui(url: str) -> bool:
     for exe in candidates:
         if os.path.exists(exe):
             try:
-                subprocess.Popen([exe, f"--app={url}", "--window-size=1400,900",
-                                  f"--user-data-dir={WINDOW_PROFILE}",
-                                  "--no-first-run", "--no-default-browser-check"])
+                reference = _app_window or window_layout.foreground_window()
+                process = subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={WINDOW_PROFILE}",
+                                            "--no-first-run", "--no-default-browser-check"])
+                _app_window = window_layout.place_browser_window(
+                    WINDOW_PROFILE, right=False, reference=reference, pid=process.pid)
                 return True
             except OSError:
                 continue
@@ -833,30 +849,9 @@ def open_ui(url: str) -> bool:
     return False
 
 
-def find_browser_pids(profile) -> list[int]:
-    """PID главных процессов Edge/Chrome, запущенных с профилем profile (без дочерних --type=...)."""
-    import subprocess
-    prof = str(profile).lower()
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | "
-          "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
-    try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
-                             text=True, encoding="utf-8", errors="replace", timeout=20,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-    except Exception:  # noqa: BLE001
-        return []
-    pids = []
-    for line in out.splitlines():
-        pid, _, cmd = line.partition("\t")
-        cmd = cmd.lower()
-        if prof in cmd and "--type=" not in cmd and pid.strip().isdigit():
-            pids.append(int(pid))
-    return pids
-
-
 def find_window_process() -> int | None:
     """PID главного процесса браузера с окном программы (ищется по профилю окна)."""
-    pids = find_browser_pids(WINDOW_PROFILE)
+    pids = window_layout.find_browser_pids(WINDOW_PROFILE)
     return pids[0] if pids else None
 
 

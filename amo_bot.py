@@ -17,6 +17,7 @@ from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError as P
 
 from excel_reader import Contact, Deal
 from paths import LOG_DIR, PROFILE_DIR, RES_DIR
+from window_layout import place_browser_window
 
 SEL = {
     # левое меню и кнопка на странице сделок
@@ -81,16 +82,17 @@ class AmoBot:
         self.should_stop = lambda: False  # функция() -> True, если нажали «Стоп»
 
     # ---------- запуск / вход ----------
-    def start(self):
+    def start(self, *, split_window: bool = False, window_reference=None):
         bundled = RES_DIR / "chromium-browsers"
         if bundled.is_dir():
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled)
         self._pw = sync_playwright().start()
         # AMO_HEADLESS=1 — без окна браузера, только для автоматических проверок
-        kwargs = dict(headless=os.environ.get("AMO_HEADLESS") == "1", slow_mo=self.slow_mo,
-                      no_viewport=True,  # страница подстраивается под реальный размер окна
-                      # если браузер закрылся аварийно — не предлагать «восстановить вкладки»
-                      args=["--start-maximized", "--hide-crash-restore-bubble"])
+        headless = os.environ.get("AMO_HEADLESS") == "1"
+        args = ["--hide-crash-restore-bubble"]
+        if not split_window:
+            args.append("--start-maximized")
+        kwargs = dict(headless=headless, slow_mo=self.slow_mo, no_viewport=True, args=args)
         # Edge есть на любом Windows 10/11 — тогда ничего не нужно скачивать.
         # Затем Chrome, затем Chromium от Playwright (если установлен).
         # У каждого браузера свой профиль: профили разных браузеров несовместимы.
@@ -116,6 +118,8 @@ class AmoBot:
         if self.page is None:
             self.page = self.ctx.new_page()
         self.page.set_default_timeout(self.timeout)
+        if split_window and not headless:
+            place_browser_window(profile, right=True, reference=window_reference)
 
     @property
     def closed(self) -> bool:
