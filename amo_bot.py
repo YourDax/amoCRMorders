@@ -11,6 +11,7 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import BrowserContext, Locator, Page, TimeoutError as PWTimeout, sync_playwright
 
@@ -28,7 +29,7 @@ SEL = {
     # теги в шапке карточки
     "tag_button": re.compile(r"^#\s*т[еэ]гировать$", re.IGNORECASE),
     "tag_editor": '[class*="tags"] input:not([type="hidden"]), input[class*="tags"], [class*="tags"] [contenteditable="true"]',
-    "tag_options": '[role="option"], .tags-lib__item, .tags-lib__tag',
+    "tag_create": re.compile(r"^\s*[↵⏎]?\s*создать\s+т[еэ]г(?:\s|$)", re.IGNORECASE),
     # контакт
     "contact_name_placeholder": "Добавить контакт",
     "label_phone": "Раб. тел.",
@@ -270,7 +271,6 @@ class AmoBot:
 
     def stored_pipeline_names(self, urls):
         """Разрешает старые записи истории по фактической воронке карточки."""
-        from urllib.parse import urlsplit
         ids = {}
         for url in urls:
             if url and urlsplit(url).netloc == urlsplit(self.base_url).netloc:
@@ -445,40 +445,93 @@ class AmoBot:
         inp.fill(name)
 
     def fill_deal_tag(self, tag: str):
+        """Вводит тег и кликает по точной подсказке либо по строке создания."""
         self.check_stop()
         p = self.page
-        exact_tag = re.compile(r"^#?\s*" + re.escape(re.sub(r"\s+", " ", tag)) + r"$")
-        chips = p.get_by_text(exact_tag).locator("visible=true")
-        initial_count = chips.count()
-
-        button = p.get_by_text(SEL["tag_button"], exact=True).locator("visible=true").first
-        button.click()
+        button = p.get_by_text(SEL["tag_button"], exact=True).or_(
+            p.get_by_role("button", name=re.compile(r"^добавить\s+т[еэ]г$", re.I))).locator("visible=true").first
+        button.click(timeout=self.timeout)
         focused = p.locator('input:not([type="hidden"]):not([name="lead[NAME]"]):not(#person_n):focus, [contenteditable="true"]:focus')
-        editor = focused.or_(p.locator(SEL["tag_editor"])).locator("visible=true").first
-        editor.fill(tag)
+        editor = focused.locator("visible=true").first
+        if not editor.count():
+            editor = p.locator(SEL["tag_editor"]).locator("visible=true").first
+        editor.fill(tag, timeout=self.timeout)
+        editor.press("End")  # редактор может обновлять подсказки по keyup
+        field = editor.bounding_box()
+        if not field or editor.evaluate("(el) => el.value ?? el.textContent") != tag:
+            raise RuntimeError(f"Не удалось ввести тег «{tag}» в amoCRM")
 
-        options = p.locator(SEL["tag_options"]).locator("visible=true")
-        option = options.filter(has_text=exact_tag).first
-        create_label = re.compile(
-            r"^(?:создать|добавить)(?: новый)? т[еэ]г(?:\s*[:—–]?\s*[«\"“]?"
-            + re.escape(re.sub(r"\s+", " ", tag)) + r"[»\"”]?)?$", re.IGNORECASE
-        )
-        create = p.get_by_text(create_label).locator("visible=true").first
-        if option.count():
-            option.click()
-        elif create.count():
-            create.click()
-        elif not options.count():
-            editor.press("Enter")
-        else:
-            raise RuntimeError(f"amoCRM предлагает другие теги, точного варианта «{tag}» нет")
+        # amoCRM может рисовать подсказки без стандартной роли option.
+        # Ищем их под редактором и исключаем название внутри строки создания тега.
+        def pick(candidates, create=False):
+            return candidates.evaluate_all(r"""(nodes, {field, create}) => nodes.findIndex(node => {
+                const rect = node.getBoundingClientRect();
+                if (rect.top < field.y + field.height - 3 || rect.top > field.y + field.height + 350 ||
+                        rect.left < field.x - 15 || rect.left > field.x + field.width) return false;
+                if (create) return true;
+                for (let row = node; row; row = row.parentElement) {
+                    if (row.getBoundingClientRect().height > 42) break;
+                    if (/создать\s+т[еэ]г/i.test(row.innerText)) return false;
+                }
+                return true;
+            })""", {"field": field, "create": create})
 
-        self._deal_name_input().click()
-        try:
-            options.first.wait_for(state="hidden", timeout=self.timeout)
-            chips.nth(initial_count).wait_for(state="visible", timeout=self.timeout)
-        except PWTimeout as exc:
-            raise RuntimeError(f"amoCRM не подтвердил добавление тега «{tag}»") from exc
+        options = p.get_by_text(tag, exact=True).locator("visible=true")
+        create_action = p.get_by_text(SEL["tag_create"]).locator("visible=true")
+
+        def click_choice():
+            index = pick(options)
+            if index >= 0:
+                options.nth(index).click(timeout=self.timeout)
+                return True
+            index = pick(create_action, create=True)
+            if index >= 0:
+                create_action.nth(index).click(timeout=self.timeout)
+                return True
+            self.wait(100)
+            return False
+
+        if not self._wait_until(click_choice, self.timeout):
+            raise RuntimeError(f"Нет точного тега «{tag}» или кнопки его создания в amoCRM")
+
+    def confirm_deal_tag(self, tag: str):
+        """Проверяет тег в сохранённой карточке и при необходимости повторяет выбор."""
+        deal = re.fullmatch(r"/leads/detail/(\d+)/?", urlsplit(self.page.url).path)
+        if not deal:
+            raise RuntimeError("Для проверки тега нужна сохранённая сделка")
+
+        def has_tag():
+            result = self.page.evaluate("""async ([id, tag]) => {
+                const r = await fetch('/api/v4/leads/' + id, {
+                    cache: 'no-store',
+                    headers: {'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'},
+                    signal: AbortSignal.timeout(5000),
+                });
+                if (r.status !== 200) return {status: r.status};
+                const data = await r.json();
+                return {found: data.id === id && data._embedded?.tags?.some(item => item.name === tag)};
+            }""", [int(deal[1]), tag])
+            if "status" in result:
+                raise RuntimeError(f"Не удалось проверить тег «{tag}» в amoCRM (HTTP {result['status']})")
+            return result.get("found", False)
+
+        if has_tag():
+            return
+
+        self.fill_deal_tag(tag)
+        save = self.page.get_by_role("button", name=SEL["save_text"], exact=True).locator("visible=true").first
+        if save.is_visible():
+            # Карточка уже существует, поэтому сохранение тега можно безопасно повторить.
+            self._save_and_wait(new_deal=False)
+
+        def persisted():
+            if has_tag():
+                return True
+            self.wait(300)
+            return False
+
+        if not self._wait_until(persisted, min(self.timeout, 5000)):
+            raise RuntimeError(f"В сохранённой сделке отсутствует тег «{tag}»")
 
     def _find_empty_contact_input(self) -> Locator | None:
         loc = self._empty_contact_name_inputs()

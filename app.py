@@ -498,6 +498,8 @@ def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, sta
     """Создаёт сделку или дозаполняет уже сохранённую (state['url'], state['contacts_done'])."""
     if state["url"]:
         bot.open_deal(state["url"])
+        if tag:
+            bot.confirm_deal_tag(tag)
     else:
         bot.open_new_deal(pipeline)
         bot.fill_deal_name(name)
@@ -519,10 +521,14 @@ def create_or_resume(bot, name: str, contacts: list[Contact], pipeline: str, sta
             state["url"] = bot.deal_url()
             state["just_created"] = True
         state["contacts_done"] += 1
+        if tag:
+            bot.confirm_deal_tag(tag)
     if not state["url"]:  # сделка без контактов
         bot._pause(f"«{name}»: контактов нет. «Продолжить» — сохранить")
         save_contact(bot, state)
         state["url"] = bot.deal_url()
+        if tag:
+            bot.confirm_deal_tag(tag)
 
 
 # ---------------- API ----------------

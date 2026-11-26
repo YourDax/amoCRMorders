@@ -114,7 +114,7 @@ class RunNotes(unittest.TestCase):
         self.assertIsNone(app.S.rows["r1"].get("countWarning"))
         self.assertIsNone(app.S.rows["r2"].get("countWarning"))
 
-    def test_prefix_tag_is_added_before_first_save_only(self):
+    def test_prefix_tag_is_selected_before_save_and_confirmed_after(self):
         from unittest.mock import Mock
 
         bot = FakeBot()
@@ -122,13 +122,32 @@ class RunNotes(unittest.TestCase):
         calls.save.side_effect = bot.save
         bot.save = calls.save
         bot.fill_deal_tag = calls.tag
+        bot.confirm_deal_tag = calls.confirm_tag
 
         different_name = {**item(1, "5б"), "name": "Название изменили вручную"}
         app.run_deals(bot, [different_name], False, "P", tag="Новый год")
         app.run_deals(bot, [different_name], False, "P", tag="Новый год")
         app.run_deals(bot, [item(2, "6б")], False, "P")
-        self.assertEqual([call[0] for call in calls.mock_calls], ["tag", "save", "save"])
+        self.assertEqual([call[0] for call in calls.mock_calls], ["tag", "save", "confirm_tag", "save"])
         calls.tag.assert_called_once_with("Новый год")
+        calls.confirm_tag.assert_called_once_with("Новый год")
+
+    def test_saved_deal_with_unconfirmed_tag_can_resume_without_duplicate(self):
+        from unittest.mock import Mock
+
+        bot = FakeBot()
+        bot.fill_deal_tag = Mock()
+        bot.confirm_deal_tag = Mock(side_effect=RuntimeError("Тег не подтверждён"))
+        row = item(1, "5б")
+        app.run_deals(bot, [row], False, "P", tag="НГ")
+        self.assertEqual(bot.created, 1)
+        self.assertEqual(app.S.rows["r1"]["status"], "partial")
+
+        bot.confirm_deal_tag.side_effect = None
+        app.run_deals(bot, [row], False, "P", tag="НГ")
+        self.assertEqual(bot.created, 1)
+        self.assertEqual(app.S.rows["r1"]["status"], "ok")
+        bot.fill_deal_tag.assert_called_once_with("НГ")
 
     def test_same_name_in_two_imports_and_resume_first(self):
         first = {**item(1, "5б"), "id": "import-first-1"}
