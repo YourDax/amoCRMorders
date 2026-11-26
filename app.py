@@ -86,6 +86,7 @@ class State:
         self.continue_evt = threading.Event()
         self.total = self.done_n = self.failed_n = self.notes_n = 0
         self.max_warnings: list[str] = []
+        self.run_warnings: list[str] = []
         self.pipelines: list[str] = list(CONFIG.get("pipelines", []))
 
     def add_log(self, msg: str):
@@ -149,6 +150,8 @@ def worker():
                 if S.stop_flag:
                     raise RuntimeError("Остановлено пользователем")
                 bot.wait(300)  # ждём через Playwright — так сразу видно, если окно amoCRM закрыли
+            if S.stop_flag:
+                raise RuntimeError("Остановлено пользователем")
         finally:
             S.waiting = None
 
@@ -203,26 +206,36 @@ def worker():
                 ensure_bot(payload["browser"])
             elif kind == "run":
                 try:
-                    b = ensure_bot(payload["browser"])  # не вошли в amoCRM — в историю нечего писать
-                    try:
-                        run_deals(b, payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
-                                  payload.get("max_chat", ""), payload.get("notes_only", False), tag=payload["tag"])
-                    finally:
-                        log_history(payload)
+                    b = ensure_bot(payload["browser"])
+                    run_deals(b, payload["deals"], payload.get("step", False), payload.get("pipeline", ""),
+                              payload.get("max_chat", ""), payload.get("notes_only", False),
+                              tag=payload["tag"], review=pause, input_warnings=payload["warnings"])
                 finally:
                     clear_queued(payload["deals"])
         except Exception as e:  # noqa: BLE001
             if is_closed_error(e) or (bot is not None and S.browser_open and bot.closed):
-                S.add_log("Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова.")
+                message = "Окно amoCRM закрыто. Нажмите «amoCRM: войти», чтобы открыть его снова."
+                S.add_log(message)
+                if kind == "run":
+                    add_run_warning(message)
                 close_bot()
             elif S.relogin:
                 S.add_log(str(e).splitlines()[0])
             elif "Остановлено пользователем" in str(e):
                 S.add_log("Остановлено.")
             else:
-                S.add_log(f"❌ {str(e).splitlines()[0][:300]}")
+                message = (str(e).splitlines() or ["Не удалось выполнить операцию"])[0][:300]
+                S.add_log(f"❌ {message}")
+                if kind == "run":
+                    add_run_warning(message)
                 S.logged_in = False
         finally:
+            if kind == "run":
+                with S.lock:
+                    unfinished = S.total - S.done_n - S.failed_n
+                if unfinished > 0:
+                    add_run_warning(f"Осталось необработанных сделок: {unfinished}.")
+                log_history(payload)
             S.phase = None
             S.running = not jobs.empty()
 
@@ -233,6 +246,12 @@ MAX_ERRORS_IN_ROW = 3  # столько ошибок подряд = что-то 
 def roster_key(item: dict) -> str:
     name = item.get("klass", "")
     return group_key(name) if item.get("kind") == "kindergarten" else class_key(name)
+
+
+def add_run_warning(message: str, *, max_warning: bool = False) -> None:
+    with S.lock:
+        (S.max_warnings if max_warning else S.run_warnings).append(message)
+    S.add_log(f"   ⚠ {message}")
 
 
 def read_kids_lists(bot, chat: str, items: list[dict]) -> dict[str, str] | None:
@@ -279,8 +298,6 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     key = roster_key(it)
     body = lists.get(key)
     if not body:
-        S.set_row(it["id"], note="none")
-        S.add_log("   Списка детей для класса или группы в чате нет")
         return
     try:
         bot.add_note(body)
@@ -289,7 +306,8 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
             raise
         shot = bot.screenshot(f"note-{name}")
         S.set_row(it["id"], note="error")
-        S.add_log(f"   ⚠ примечание не добавлено: {str(e).splitlines()[0][:200]} (скриншот: {shot.name})")
+        add_run_warning(f"«{it['name']}»: список детей не добавлен. "
+                        f"{(str(e).splitlines() or ['Ошибка сохранения'])[0][:200]} (скриншот: {shot.name})")
         return
     progress.setdefault(name, {})["note"] = True
     save_progress(progress)
@@ -299,7 +317,8 @@ def add_kids_note(bot, it: dict, lists: dict[str, str] | None, progress: dict, n
     S.add_log(f"   📝 примечание: список детей ({count_kids(body, {key})})")
 
 
-def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False, *, tag: str = ""):
+def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str = "", notes_only: bool = False,
+              *, tag: str = "", review=None, input_warnings=()):
     from amo_bot import BrowserClosed, is_closed_error
     progress = load_progress()
     S.running = True
@@ -307,27 +326,60 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
     with S.lock:
         S.total, S.done_n, S.failed_n, S.notes_n = len(items), 0, 0, 0
         S.max_warnings = []
+        S.run_warnings = list(input_warnings)
     lists = None
+    previous = {}
+    for it in items:
+        record = progress_key(progress, history.progress_key(it), pipeline)
+        prev = progress.get(record, {})
+        previous[it["id"]] = (record, prev)
+        if prev.get("status") == "uncertain":
+            add_run_warning(f"«{it['name']}»: сделка пропущена, проверьте результат сохранения в amoCRM.")
+        elif notes_only and prev.get("status") != "ok":
+            add_run_warning(f"«{it['name']}»: список не будет добавлен, сначала создайте сделку.")
     if max_chat:
-        todo = [it for it in items if not progress.get(progress_key(progress, history.progress_key(it), pipeline), {}).get("note")]
-        if notes_only:
-            todo = [it for it in todo if progress.get(progress_key(progress, history.progress_key(it), pipeline), {}).get("status") == "ok"]
+        todo = []
+        for it in items:
+            record, prev = previous[it["id"]]
+            status = prev.get("status")
+            if prev.get("note") or status == "uncertain" or (notes_only and status != "ok"):
+                continue
+            if status == "ok" and (not record.startswith(("[", "import-")) or not prev.get("url")):
+                add_run_warning(f"«{it['name']}»: список не будет добавлен. Проверьте ссылку и воронку сделки.")
+                S.set_row(it["id"], note="error")
+                continue
+            todo.append(it)
         if todo:
-            lists = read_kids_lists(bot, max_chat, todo)
+            readable = [it for it in todo if roster_key(it)]
+            if readable:
+                lists = read_kids_lists(bot, max_chat, readable)
+            missing = set()
             for it in todo:
+                key = roster_key(it)
+                S.set_row(it["id"], countWarning=None, note=None)
+                if not key:
+                    add_run_warning(f"«{it['name']}»: не распознан класс или группа для поиска списка.", max_warning=True)
+                    S.set_row(it["id"], note="error")
+                    continue
                 if lists is None:
                     S.set_row(it["id"], note="error")
                     continue
+                if not lists.get(key):
+                    missing.add(key)
+                    S.set_row(it["id"], note="none")
                 expected = it.get("expectedKids")
                 if type(expected) is not int or expected < 0:
                     continue
-                key = roster_key(it)
                 found = count_kids(lists.get(key, ""), {key})
-                warning = None
                 if expected != found:
                     warning = f"В таблице {expected}, в MAX {found}"
-                    S.add_log(f"   ⚠ «{it['name']}»: {warning}")
-                S.set_row(it["id"], countWarning=warning)
+                    S.set_row(it["id"], countWarning=warning)
+                    add_run_warning(f"{it['name']} — {warning}", max_warning=True)
+            if missing:
+                add_run_warning(f"Не найдены списки в MAX: {', '.join(sorted(missing))}.", max_warning=True)
+    if review and not S.stop_flag and (S.max_warnings or S.run_warnings):
+        action = "добавлять списки детей" if notes_only else "создавать сделки"
+        review(f"Проверьте предупреждения выше. Нажмите «Продолжить», чтобы {action}, или «Стоп» для отмены.")
     errors_in_row = 0
     for n, it in enumerate(items, 1):
         if S.stop_flag:
@@ -350,10 +402,10 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                 S.failed_n += 1
             continue
         if prev.get("status") == "ok":
-            S.set_row(rid, status="skip", url=prev.get("url"), note="ok" if prev.get("note") else ("error" if max_chat and lists is None else None))
-            if lists is not None and not record.startswith(("[", "import-")):
-                S.add_log("Воронка старой карточки не подтверждена. Проверьте ссылку в истории.")
-            elif lists is not None and not prev.get("note") and prev.get("url"):
+            S.set_row(rid, status="skip", url=prev.get("url"))
+            if prev.get("note"):
+                S.set_row(rid, note="ok")
+            elif lists is not None and lists.get(roster_key(it)) and prev.get("url") and record.startswith(("[", "import-")):
                 S.add_log(f"[{n}/{len(items)}] «{name}» — уже создана, добавляю список детей")
                 try:
                     bot.open_deal(prev["url"])
@@ -361,11 +413,15 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
                 except Exception as e:  # noqa: BLE001
                     if is_closed_error(e) or bot.closed:
                         S.logged_in = False
-                        S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
+                        add_run_warning("Окно amoCRM закрыто во время добавления списков детей.")
                         break
                     if "Остановлено пользователем" not in str(e):
                         S.set_row(rid, note="error")
-                        S.add_log(f"   ⚠ {str(e).splitlines()[0][:300]}")
+                        add_run_warning(f"«{name}»: список детей не добавлен. "
+                                        f"{(str(e).splitlines() or ['Ошибка открытия сделки'])[0][:300]}")
+                    else:
+                        S.set_row(rid, note="error")
+                        add_run_warning(f"«{name}»: добавление списка детей прервано.")
             else:
                 S.add_log(f"Пропуск «{name}» — уже создана" + (" (список детей уже добавлен)" if prev.get("note") else ""))
             with S.lock:
@@ -424,14 +480,23 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
             errors_in_row = 0
             with S.lock:
                 S.done_n += 1
-            if not S.stop_flag:
+            if S.stop_flag and lists and lists.get(roster_key(it)):
+                add_run_warning(f"«{name}»: сделка создана, список детей не добавлен из-за остановки.")
+                S.set_row(rid, note="error")
+            elif not S.stop_flag:
                 try:  # сделка уже создана: без примечания её можно дополнить позже кнопкой «Списки детей»
                     add_kids_note(bot, it, lists, progress, record)
                 except Exception as e:  # noqa: BLE001
                     if is_closed_error(e) or bot.closed:
                         S.logged_in = False
-                        S.add_log("❌ Окно amoCRM закрыто — останавливаюсь.")
+                        add_run_warning(f"«{name}»: сделка создана, окно amoCRM закрыто при добавлении списка.")
+                        S.set_row(rid, note="error")
                         break
+                    if S.stop_flag:
+                        add_run_warning(f"«{name}»: сделка создана, добавление списка прервано.")
+                        S.set_row(rid, note="error")
+                    else:
+                        raise
             continue
         err = "Остановлено" if S.stop_flag else (str(last_err).splitlines() or ["Не удалось создать сделку"])[0][:300]
         S.set_row(rid, status="uncertain" if getattr(last_err, "uncertain_save", False) else ("partial" if state["url"] else "error"), error=err, url=state["url"])
@@ -439,6 +504,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
             S.add_log("Проверьте результат в amoCRM. Автоповтор отключён.")
         elif state["url"]:
             S.add_log("   Сделка сохранена не полностью — можно нажать «Повторить ошибочные», бот дозаполнит её.")
+        add_run_warning(f"«{name}»: {'сохранение нужно проверить' if getattr(last_err, 'uncertain_save', False) else 'сделка сохранена не полностью' if state['url'] else 'сделка не создана'}. {err}")
         with S.lock:
             S.failed_n += 1
         if isinstance(last_err, BrowserClosed):
@@ -447,7 +513,7 @@ def run_deals(bot, items: list[dict], step: bool, pipeline: str, max_chat: str =
             break
         errors_in_row += 1
         if errors_in_row >= MAX_ERRORS_IN_ROW:
-            S.add_log(f"❌ {MAX_ERRORS_IN_ROW} ошибки подряд — останавливаюсь. Посмотрите скриншоты в папке logs.")
+            add_run_warning(f"Запуск остановлен после {MAX_ERRORS_IN_ROW} ошибок подряд. Скриншоты в папке logs.")
             break
     clear_queued(items)
     S.add_log(f"Готово: {'обработано' if notes_only else 'создано'} {S.done_n}, с ошибками {S.failed_n}.")
@@ -468,6 +534,7 @@ def log_history(payload: dict):
         return
     with S.lock:
         done, failed, notes, total = S.done_n, S.failed_n, S.notes_n, S.total
+        warnings = list(dict.fromkeys([*S.max_warnings, *S.run_warnings]))
     if payload.get("notes_only"):
         text = f"Списки детей в созданные: добавлено {notes} из {total}"
     else:
@@ -479,7 +546,7 @@ def log_history(payload: dict):
     if S.stop_flag:
         text += " — остановлено"
     try:
-        history.add_action(hid, text)
+        history.add_action(hid, text, warnings=warnings)
     except OSError:
         pass
 
@@ -576,6 +643,8 @@ def api_parse():
         S.rows = {}
         S.total = S.done_n = S.failed_n = S.notes_n = 0
         S.max_warnings = []
+        S.run_warnings = []
+        S.row_pipeline = ""
     school = deals[0].school if deals else ""
     kind = kind or "school"
     for d in out:
@@ -635,22 +704,30 @@ def api_run():
         return jsonify(error="Укажите префикс для тега"), 400
     if notes_only and not max_chat:
         return jsonify(error="Впишите название чата MAX со списками детей"), 400
+    warnings = data.get("warnings", [])
+    if not isinstance(warnings, list) or not all(isinstance(w, str) for w in warnings):
+        return jsonify(error="Некорректные предупреждения отчёта"), 400
     with S.lock:  # два быстрых нажатия не должны запустить работу дважды
         if S.running:
             return jsonify(error="Уже идёт работа"), 409
         S.running = True
         S.stop_flag = False
+        S.row_pipeline = pipeline
+        S.total, S.done_n, S.failed_n, S.notes_n = len(items), 0, 0, 0
+        S.max_warnings = []
+        S.run_warnings = warnings
         for it in items:
             S.rows[it["id"]] = {"status": "queued"}
     jobs.put(("run", {"deals": items, "step": bool(data.get("step")), "pipeline": pipeline,
                       "max_chat": max_chat, "notes_only": notes_only, "browser": browser, "tag": tag,
-                      "history_id": data.get("historyId") or ""}))
+                      "history_id": data.get("historyId") or "", "warnings": warnings}))
     return jsonify(ok=True)
 
 
 @app.post("/api/continue")
 def api_continue():
-    S.continue_evt.set()
+    if S.waiting and not S.stop_flag:
+        S.continue_evt.set()
     return jsonify(ok=True)
 
 
@@ -688,10 +765,13 @@ def api_history_open(hid):
     progress = load_progress()
     history.refresh_deals(e.get("deals"), progress)
     history.refresh_deals(e.get("original"), progress)
+    last_run = next((a for a in reversed(e.get("actions") or []) if "warnings" in a), {})
     with S.lock:
         S.rows = {}
         S.total = S.done_n = S.failed_n = S.notes_n = 0
         S.max_warnings = []
+        S.run_warnings = last_run.get("warnings", [])
+        S.row_pipeline = ""
     return jsonify(entry=e)
 
 
@@ -723,7 +803,8 @@ def api_status():
         return jsonify(log=S.log[-200:], rows=S.rows, running=S.running, waiting=S.waiting,
                        loggedIn=S.logged_in, phase=S.phase, amoUrl=CONFIG["amo_url"], version=paths.VERSION,
                        pipelines=S.pipelines, rowPipeline=getattr(S,"row_pipeline",""), total=S.total, doneN=S.done_n, failedN=S.failed_n,
-                       notesN=S.notes_n, browser=S.browser_choice, maxWarnings=S.max_warnings)
+                       notesN=S.notes_n, browser=S.browser_choice, maxWarnings=S.max_warnings,
+                       runWarnings=S.run_warnings)
 
 
 def open_ui(url: str) -> bool:

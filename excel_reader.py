@@ -327,6 +327,8 @@ def read_deals(path: str, sheets: list[str] | None = None, school_override: str 
         for r in range(header_row + 1, ws.max_row + 1):
             klass = _cell_text(get(r, "class"))
             if not klass:
+                if any(_cell_text(get(r, key)) for key in ("kr_name", "kr_phone", "rk_name", "rk_phone")):
+                    sheet_warns.append(f"«{ws.title}» стр.{r}: есть контакты, но не указан класс или группа. Строка пропущена.")
                 continue
             if not school:
                 warnings.append(f"Лист «{ws.title}»: не заполнен {place_word}, строки пропущены")

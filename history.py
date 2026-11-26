@@ -73,7 +73,7 @@ def prefixes() -> list[str]:
         return list(dict.fromkeys(value for value in values if value))
 
 
-def add_action(hid: str, text: str) -> None:
+def add_action(hid: str, text: str, *, warnings: list[str] | None = None) -> None:
     if not hid:
         return
     with _lock:
@@ -81,7 +81,10 @@ def add_action(hid: str, text: str) -> None:
         e = _find(entries, hid)
         if e is None:
             return
-        e.setdefault("actions", []).append({"at": _now(), "text": text})
+        action = {"at": _now(), "text": text}
+        if warnings is not None:
+            action["warnings"] = warnings
+        e.setdefault("actions", []).append(action)
         e["actions"] = e["actions"][-MAX_ACTIONS:]
         e["updated"] = _now()
         _save(entries, e)

@@ -73,8 +73,10 @@ class RunNotes(unittest.TestCase):
         self.calls = []
         app.read_kids_lists = lambda bot, chat, items: self.calls.append([i["klass"] for i in items]) or LISTS
         app.S.rows = {}
+        app.S.stop_flag = False
 
     def tearDown(self):
+        app.read_kids_lists = read_kids_lists
         self.tmp.cleanup()
 
     def test_create_adds_notes(self):
@@ -171,6 +173,53 @@ class RunNotes(unittest.TestCase):
         self.assertEqual(app.S.rows["r1"]["countWarning"], "В таблице 2, в MAX 1")
         self.assertIsNone(app.S.rows["r2"].get("countWarning"))
         self.assertEqual(app.S.rows["r3"]["countWarning"], "В таблице 3, в MAX 0")
+
+    def test_missing_max_lists_are_visible_before_creating_and_in_history(self):
+        from unittest.mock import patch
+        import history
+
+        rows = [item(1, "5б"), *[item(i, klass) for i, klass in enumerate(("2д", "4е", "5и", "Без класса"), 2)]]
+        bot = FakeBot()
+        missing = "Не найдены списки в MAX: 2д, 4е, 5и."
+
+        def review(_):
+            status = app.app.test_client().get("/api/status").get_json()
+            self.assertEqual(bot.created, 0)
+            self.assertIn(missing, status["maxWarnings"])
+            self.assertEqual(status["rows"]["r2"]["note"], "none")
+            self.assertEqual(status["rows"]["r5"]["note"], "error")
+            self.assertTrue(any("не распознан класс" in w for w in status["maxWarnings"]))
+
+        app.run_deals(bot, rows, False, "P", "Чат", review=review)
+        self.assertEqual(bot.created, 5)
+        self.assertEqual(len(bot.notes), 1)
+        self.assertIn(missing, app.S.max_warnings)
+        with patch.object(history, "FILE", Path(self.tmp.name) / "history.json"):
+            hid = history.create({"file": "a.xlsx", "deals": []}, "Загружен файл")
+            app.log_history({"history_id": hid, "pipeline": "P", "max_chat": "Чат"})
+            self.assertIn(missing, history.get(hid)["actions"][-1]["warnings"])
+
+    def test_stopping_at_warning_review_prevents_creation(self):
+        bot = FakeBot()
+
+        def stop(_):
+            app.S.stop_flag = True
+
+        app.run_deals(bot, [item(1, "2д")], False, "P", "Чат", review=stop)
+        self.assertEqual(bot.created, 0)
+        self.assertEqual(app.S.rows["r1"]["note"], "none")
+
+    def test_note_save_failure_is_reported_after_successful_creation(self):
+        from unittest.mock import Mock
+
+        bot = FakeBot()
+        bot.add_note = Mock(side_effect=RuntimeError("Ошибка записи примечания"))
+        review = Mock()
+        app.run_deals(bot, [item(1, "5б")], False, "P", "Чат", review=review)
+        self.assertEqual(bot.created, 1)
+        review.assert_not_called()
+        self.assertEqual(app.S.rows["r1"]["note"], "error")
+        self.assertTrue(any("Ошибка записи примечания" in w for w in app.S.run_warnings))
 
     def test_without_chat_no_notes(self):
         bot = FakeBot()

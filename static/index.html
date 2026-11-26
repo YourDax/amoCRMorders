@@ -380,7 +380,9 @@ async function upload(f){
 
 // показать таблицу: только что загруженную или из «Истории»
 function showTable(e){
-  S.rows = {}; S.total = 0; S.maxWarnings = [];
+  ++pollSequence;
+  S.rows = {}; S.total = 0; S.rowPipeline = ""; S.maxWarnings = [];
+  S.runWarnings = (e.actions || []).slice().reverse().find(a => Array.isArray(a.warnings))?.warnings || [];
   const strip = list => clone(list || []).map(d => { d.kind ??= e.kind; d.school ??= e.school; delete d._final; return d; });
   histId = e.id || null; curFile = e.file || ""; curWarnings = e.warnings || [];
   original = strip(e.original); deals = strip(e.deals); school = e.school || ""; prefix = e.prefix || "";
@@ -456,7 +458,7 @@ function applyKindUI(){
 function renderRows(){
   if(!deals.length){
     $("#rows").innerHTML = `<tr><td colspan="9" class="empty">${original.length ? "Список пуст — «Вернуть как в файле» восстановит строки" : "Нет строк"}</td></tr>`;
-    updateUI(); return;
+    renderCountWarnings(); updateUI(); return;
   }
   $("#rows").innerHTML = deals.map(d => {
     const inp = (f, v) => `<input type="text" data-f="${f}" value="${esc(v)}">`;
@@ -558,10 +560,14 @@ $("#btnClear").onclick = () => {
 
 function renderCountWarnings(){
   const counts = deals.filter(d => d.countWarning).map(d => `${d.name} — ${d.countWarning}`);
-  const warnings = deals.length ? [...(S.maxWarnings || []), ...counts] : [];
+  const samePipeline = !S.rowPipeline || S.rowPipeline === $("#pipeline").value;
+  const maxWarnings = samePipeline ? (S.maxWarnings || []) : [];
+  const runWarnings = samePipeline ? (S.runWarnings || []) : [];
+  const warnings = deals.length ? [...new Set([...maxWarnings, ...counts, ...runWarnings])] : [];
+  const title = runWarnings.length ? "Предупреждения по сделкам" : "Предупреждения MAX";
   const box = $("#maxCountWarning");
   const html = warnings.length
-    ? `<div class="warn max-count-warning"><strong>Предупреждения MAX</strong>
+    ? `<div class="warn max-count-warning"><strong>${title}</strong>
          <ul>${warnings.map(warning => `<li>${esc(warning)}</li>`).join("")}</ul></div>`
     : "";
   if(box.innerHTML !== html) box.innerHTML = html;
@@ -647,15 +653,21 @@ async function run(list, notesOnly = false){
   if(items.some(i => !i.name)){ alert("У некоторых сделок пустое название"); return; }
   const pipeline = $("#pipeline").value;
   if(!pipeline){ alert("Выберите воронку"); return; }
-  const bad = list.filter(d => Object.keys(problems(d)).length).length;
+  const warnings = [...curWarnings];
+  for(const d of list){
+    const issues = Object.values(problems(d));
+    if(d.red) issues.push("строка помечена красным в отчёте");
+    if(d.refused) issues.push("в отчёте есть признак отказа");
+    if(issues.length) warnings.push(`«${d.name}»: ${issues.join("; ")}.`);
+  }
   let msg = `Создать ${items.length} ${plural(items.length,"сделку","сделки","сделок")} в воронке «${pipeline}»?`;
   if(tagFromPrefix) msg += `\n\nТег сделки «${prefix}».`;
-  if(bad) msg += `\n\nУ ${bad} есть замечания (подсвечены жёлтым).`;
+  if(warnings.length) msg += "\n\nПеред созданием появится рамка с замечаниями к отчёту.";
   msg += maxChat ? `\n\nСписки детей — из чата MAX «${maxChat}».` : "\n\nЧат MAX не указан — без списков детей.";
   if(!S.loggedIn) msg += "\n\nОткроется окно amoCRM — если попросит, войдите в аккаунт.";
   if(!confirm(msg)) return;
   saveNow();
-  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, prefix, tagFromPrefix, browser: $("#browser").value, historyId: histId})) poll();
+  if(await post("/api/run", {deals: items, step: $("#step").checked, pipeline, maxChat, prefix, tagFromPrefix, warnings, browser: $("#browser").value, historyId: histId})) poll();
 }
 $("#btnRun").onclick = () => run(selected());
 $("#btnRetry").onclick = () => run(failedRows());
@@ -741,7 +753,7 @@ async function openHistoryMenu(){
   pop.innerHTML = items.map(h => {
     const acts = (h.actions || []).slice().reverse();
     return `<button class="hitem${h.id === histId ? " cur" : ""}" data-hid="${esc(h.id)}" role="menuitem"
-      title="${esc(acts.map(a => fmtAt(a.at) + "  " + a.text).join("\n"))}">
+      title="${esc(acts.map(a => [fmtAt(a.at) + "  " + a.text, ...(a.warnings || [])].join("\n")).join("\n\n"))}">
       <div class="h1"><b>${esc(h.file)}</b><span class="hstate st-${esc(h.state)}">${esc((HSTATE[h.state] || HSTATE.empty)(h))}</span></div>
       <div class="h2">${esc(h.school ? h.school + " · " : "")}изменена ${esc(fmtAt(h.updated))}</div>
       ${acts[0] ? `<div class="h3">${esc(fmtAt(acts[0].at) + " — " + acts[0].text)}</div>` : ""}
@@ -761,15 +773,19 @@ $("#histPop").addEventListener("click", async e => {
   const r = await fetch(`/api/history/${encodeURIComponent(b.dataset.hid)}`);
   const j = await r.json().catch(() => ({}));
   if(!r.ok){ alert(j.error || "Не удалось открыть таблицу"); return; }
-  S.rows = {}; S.total = 0;
   showTable(j.entry);
 });
 
 // ---------- состояние с сервера ----------
+let pollSequence = 0;
 async function poll(){
+  const sequence = ++pollSequence;
   try{
-    S = await (await fetch("/api/status")).json();
+    const status = await (await fetch("/api/status")).json();
+    if(sequence !== pollSequence) return;
+    S = status;
   }catch(e){
+    if(sequence !== pollSequence) return;
     $("#conn").textContent = "программа закрыта — запустите её снова"; $("#conn").classList.remove("on"); return;
   }
   fillPipelines(S.pipelines || []);
