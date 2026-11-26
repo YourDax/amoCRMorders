@@ -119,6 +119,43 @@ class Messages(unittest.TestCase):
         self.assertEqual(count_kids(msg), 3)
         self.assertEqual(collect_lists([msg, "Третий Ребёнок добавился"]), {"2к": msg})
 
+    def test_number_in_parentheses_is_count_not_class_suffix(self):
+        message = "1 а (4)\n\nИванова Анна \nПетров Иван\nСидорова Мария\nОрлов Александр"
+        roster = "1 а (4)\nИванова Анна\nПетров Иван\nСидорова Мария\nОрлов Александр"
+        with_suffix = "1а4\nКузнецова Елена"
+        need = {"1а", "1а4"}
+
+        self.assertEqual(parse_message(message), [("1а", roster, True)])
+        self.assertEqual(full_list_keys([message], need), {"1а"})
+        self.assertEqual(collect_lists([message, with_suffix], need), {"1а": roster, "1а4": with_suffix})
+        self.assertEqual(count_kids(roster, need), 4)
+
+    def test_list_heading_and_surname_only_rows_in_one_or_several_messages(self):
+        surnames = ["Иванова", "Петрова", "Орлов", "Сидоров", "Волкова", "Ким", "Попов", "Ли", "Смирнова", "Кузнецова"]
+        rows = [f"{i}.{' ' if i % 2 == 0 else ''}{name}" for i, name in enumerate(surnames, 1)]
+        for heading in ("Список 3А", "Список: 3 А", "📋 Список класса 3‑А:", "Список детей для 3А (10)"):
+            full = "\n".join([heading, *rows])
+            for messages in ([heading + "\n\n" + "\n".join(rows)], [heading, *rows],
+                             ["\n".join([heading, *rows[:3]]), "\n".join(rows[3:7]), *rows[7:]]):
+                with self.subTest(heading=heading, messages=len(messages)):
+                    self.assertEqual(collect_lists(messages + ["1. Другая"], {"3а"}), {"3а": full})
+                    self.assertEqual(full_list_keys(messages, {"3а"}), {"3а"})
+                    self.assertEqual(count_kids(full), 10)
+
+    def test_explicit_standalone_heading_and_unnumbered_surnames(self):
+        rows = "Иванова\nПетрова\nОрлов"
+        self.assertEqual(collect_lists(["Список 3А", rows, "Добрый день"], {"3а"}), {"3а": "Список 3А\n" + rows})
+        self.assertEqual(collect_lists(["Список 3А", "Добрый день"], {"3а"}), {})
+
+    def test_attention_mark_and_unnamed_siblings(self):
+        roster = "! 1-МА класс\n1. Иванова Анна +брат\n2. Петров Иван + брат (Возьму 2 комплекта)"
+        self.assertEqual(collect_lists([roster], {"1ма"}), {"1ма": roster})
+        self.assertEqual(full_list_keys([roster.replace("! 1-", "‼️ 1‑")], {"1ма"}), {"1ма"})
+        self.assertEqual(count_kids(roster), 4)
+        self.assertEqual(count_kids("1МА\n1. Иванова Анна + 2 комплекта"), 1)
+        merged = collect_lists(["1МА\n1. Иванова Анна", roster], {"1ма"})["1ма"]
+        self.assertEqual(count_kids(merged), 4)
+
     def test_counted_roster_with_comment(self):
         roster = (
             "1д (7чел) должно было быть 9, 2 заболели\nВремя 9:10\n"

@@ -61,7 +61,10 @@ _BUBBLES_JS = r"""
   const ignored = quote + ', .meta, [class*="sender" i], [class*="author" i], [data-role="author"], .bubble';
   const bubbles = [...document.querySelectorAll('.bubble')].filter(b => !b.parentElement.closest('.bubble'));
   const cleanText = node => {
-    if (!node.querySelector(ignored)) return node.innerText || '';
+    if (!node.querySelector(ignored)) {
+      const rendered = node.innerText || '';
+      if (rendered.includes('\n') || !node.textContent.includes('\n')) return rendered;
+    }
     const clean = node.cloneNode(true);
     clean.querySelectorAll(ignored).forEach(el => el.remove());
     clean.querySelectorAll('br').forEach(el => el.replaceWith('\n'));
@@ -70,9 +73,10 @@ _BUBBLES_JS = r"""
   };
   const originalMessages = bubbles.filter(b => !b.querySelector(quote));
   const messages = originalMessages.map(b => {
-    const texts = [...b.querySelectorAll('.text')].filter(t => {
+    const content = '.text, ol, ul';
+    const texts = [...b.querySelectorAll(content)].filter(t => {
       const excluded = t.closest(ignored);
-      const parentText = t.parentElement.closest('.text');
+      const parentText = t.parentElement.closest(content);
       return (!excluded || excluded === b || !b.contains(excluded))
         && (!parentText || !b.contains(parentText));
     });
