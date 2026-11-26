@@ -268,7 +268,7 @@ class MaxChatReading(unittest.TestCase):
         chat.page = Mock()
         first = "1А\n1. Орлова Анна"
         delayed = "1Б\n1. Примеров Пётр\n2. Иванова Анна + Иванова Вера\nДругова Мария нет"
-        snapshots = iter([[first], [first], [first], [delayed, first]])
+        snapshots = iter([[first]] * 6 + [[delayed, first]])
         scrollers = iter([False, True])
         scrolls = iter([{"before": 100, "after": 25, "height": 300}, None])
 
@@ -299,7 +299,7 @@ class MaxChatReading(unittest.TestCase):
         chat.page = Mock()
         older = "5Г\n1. Иванова\n2. Петров\nВасилий Сидоров отказался"
         newer = "5Г\n1. Орлов Артём"
-        snapshots = iter([[newer], [newer], [older, newer]])
+        snapshots = iter([[newer]] * 5 + [[older, newer]])
         scrolls = iter([{"before": 100, "after": 25, "height": 300}, None])
 
         def evaluate(script):
@@ -317,6 +317,57 @@ class MaxChatReading(unittest.TestCase):
         body = chat.read_lists("Чат", {"5г"})["5г"]
         self.assertEqual(body, "5Г\n1. Иванова\n2. Петров\n3. Орлов Артём\nВасилий Сидоров отказался")
         self.assertEqual(count_kids(body), 3)
+
+    def test_collects_delayed_tail_before_scrolling_to_older_messages(self):
+        from unittest.mock import Mock
+        from max_chat import MaxChat, _BUBBLES_JS, _SCROLLER_JS, _SCROLL_BOTTOM_JS, _SCROLL_UP_JS
+
+        chat = MaxChat(None)
+        chat.open = Mock()
+        chat.open_chat = Mock(return_value=False)
+        chat._sleep = Mock()
+        chat.page = Mock()
+        earlier = "4Г\n1. Орлова Анна"
+        tail = [
+            "6Б\n1.Иванова Анна\n2.Петрова София",
+            "5а\n1.Кузнецова\n2.Смирнова\n3.Лебедев\n4.Орлова\n5.Попова",
+            "5в\n1.Михайлова\n2.Алексеева\n3.Козлов",
+        ]
+        scrolls_to_bottom = 0
+        scrolling_up = False
+
+        def evaluate(script):
+            nonlocal scrolls_to_bottom, scrolling_up
+            if script == _BUBBLES_JS:
+                messages = tail if scrolls_to_bottom >= 3 and not scrolling_up else [earlier]
+                return {"messages": messages, "hasReplies": False}
+            if script == _SCROLLER_JS:
+                return True
+            if script == _SCROLL_BOTTOM_JS:
+                scrolls_to_bottom += 1
+                return None
+            if script == _SCROLL_UP_JS:
+                scrolling_up = True
+                return None
+            self.fail(f"Unexpected script: {script}")
+
+        chat.page.evaluate.side_effect = evaluate
+        found = chat.read_lists("Чат", {"4г", "5а", "5в", "6б"})
+        self.assertEqual({key: count_kids(body) for key, body in found.items()},
+                         {"4г": 1, "5а": 5, "5в": 3, "6б": 2})
+
+    def test_retries_even_if_chat_was_already_open(self):
+        from unittest.mock import Mock
+        from max_chat import MaxChat
+
+        chat = MaxChat(None, log=Mock())
+        chat.open = Mock()
+        chat.open_chat = Mock(return_value=False)
+        chat._sleep = Mock()
+        chat._visible_messages = Mock(return_value=["6Б\n1. Орлова Анна"])
+        chat._scan_history = Mock(side_effect=[([], False), (["6Б\n1. Орлова Анна"], False)])
+        self.assertEqual(chat.read_lists("Чат", {"6б"}), {"6б": "6Б\n1. Орлова Анна"})
+        self.assertEqual(chat._scan_history.call_count, 2)
 
     def test_journal_counts_unique_lists(self):
         from max_chat import MaxChat

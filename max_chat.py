@@ -22,6 +22,7 @@ MAX_URL = os.environ.get("AMO_MAX_URL", "https://web.max.ru/")  # другой �
 _MAX_HOST = MAX_URL.split("://", 1)[-1].split("/", 1)[0]
 LOGIN_WAIT_MIN = 10
 SCROLL_MAX_STEPS = 400  # ~ несколько тысяч сообщений; дальше история слишком длинная
+BOTTOM_MAX_READS = 6
 
 _SEARCH_INPUTS = [
     "input.field[placeholder='Найти']",
@@ -272,7 +273,7 @@ class MaxChat:
         self.warnings: list[str] = []
         self._saw_replies = False
         self.open()
-        newly_opened = self.open_chat(chat)
+        self.open_chat(chat)
         for _ in range(40):  # сообщения подгружаются после открытия чата
             if self._visible_messages():
                 break
@@ -281,9 +282,9 @@ class MaxChat:
             raise RuntimeError("В чате MAX не видно сообщений")
         history, limited = self._scan_history(need)
         lists = collect_lists(history, need)
-        if newly_opened and need.difference(lists):
-            # Первая порция сообщений бывает видна до готовности всей области истории.
-            self.log("MAX: после открытия найдены не все списки, повторяю чтение истории.")
+        if need.difference(lists):
+            self.log(f"MAX: после первого чтения найдено {len(need & lists.keys())} из {len(need)} списков, "
+                     "повторяю чтение истории.")
             self._sleep(1500)
             retry_history, retry_limited = self._scan_history(need)
             history = merge_history(history, retry_history)
@@ -293,13 +294,29 @@ class MaxChat:
             self.warnings.append("Достигнут предел чтения истории MAX. Списки из более ранних сообщений могли не попасть в сделки.")
         return lists
 
+    def _read_bottom(self) -> list[str]:
+        """Дожидается свежих сообщений до начала прокрутки вверх."""
+        history: list[str] = []
+        previous = None
+        stable = 0
+        for _ in range(BOTTOM_MAX_READS):
+            # Высота истории может вырасти при догрузке, поэтому возвращаемся вниз.
+            self.page.evaluate(_SCROLL_BOTTOM_JS)
+            self._sleep(750)
+            snapshot = self._visible_messages()
+            if snapshot:
+                history = merge_history(snapshot, history) if history else snapshot
+            stable = stable + 1 if snapshot and snapshot == previous else 0
+            if stable >= 2:
+                break
+            previous = snapshot
+        return history
+
     def _scan_history(self, need: set[str]) -> tuple[list[str], bool]:
         if not self.page.evaluate(_SCROLLER_JS):
             return self._visible_messages(), False
-        self.page.evaluate(_SCROLL_BOTTOM_JS)
-        self._sleep(800)
-        history: list[str] = []  # тексты сообщений от старых к новым
-        full: set[str] = set()
+        history = self._read_bottom()
+        full = full_list_keys(history, need)
         scan_all = any(is_school_class(key) for key in need)
         still = 0
         for step in range(SCROLL_MAX_STEPS):
