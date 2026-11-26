@@ -642,7 +642,7 @@ function editedClass(d){
   const namePrefix = prefix.replace(/\s+/g, " ");
   if(namePrefix && name.startsWith(namePrefix + " ")) name = name.slice(namePrefix.length).trim();
   if(d.school && name.endsWith(" " + d.school)) return name.slice(0, -d.school.length).trim();
-  const match = name.match(/^(?:гр(?:уппа)?\.?\s*)?\d{1,2}(?:\s*[-«"]?\s*[а-яёa-z]{1,2}[»"]?)?(?=\s|$)/i);
+  const match = name.match(/^(?:гр(?:уппа)?\.?\s*)?\d{1,2}(?:\s*[-«"]?\s*[а-яёa-z]{1,2}[»"]?(?:\d{1,2}|\s*[\\/]\s*\d{1,2})?)?(?=\s|$)/i);
   return match ? match[0] : d.klass;
 }
 async function run(list, notesOnly = false){

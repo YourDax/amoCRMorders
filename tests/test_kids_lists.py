@@ -61,6 +61,13 @@ class ClassKey(unittest.TestCase):
         self.assertEqual(class_key("гр.11"), "11")
         self.assertEqual(class_key("11 группа"), "11")
 
+    def test_numbered_classes(self):
+        expected = {r"1м\1": "1м1", "1М/1": "1м1", "1 М1": "1м1",
+                    "2м2": "2м2", "2м1": "2м1"}
+        for raw, key in expected.items():
+            self.assertEqual(class_key(raw), key, raw)
+        self.assertEqual(class_key("1/2"), "")
+
     def test_not_class(self):
         for s in ("Спасибо", "12:40", "Иванов Иван", "", "2024"):
             self.assertEqual(class_key(s), "", s)
@@ -86,6 +93,22 @@ class Messages(unittest.TestCase):
                          [("4в", "София\n4в Сизинцева София", False)])
         self.assertEqual(parse_message("Завтра в 10:00, не опаздывайте"), [])
         self.assertEqual(parse_message("12 детей придут"), [])
+
+    def test_numbered_classes_in_full_and_short_messages(self):
+        first = r"1М/1" + "\n1. Орлова Анна"
+        second = "Фотосессия 2 М2:\n1. Петрова Вера"
+        third = "2м1 Иванова Мария"
+        fourth = r"1м\1" + "\n1. Смирнова Ирина"
+        need = {"1м1", "2м2", "2м1"}
+
+        lists = collect_lists([first, second, third, fourth], need)
+        self.assertEqual(lists["2м2"], second)
+        self.assertEqual(lists["2м1"], third)
+        self.assertIn("Орлова Анна", lists["1м1"])
+        self.assertIn("Смирнова Ирина", lists["1м1"])
+        self.assertEqual({key: count_kids(body) for key, body in lists.items()},
+                         {"1м1": 2, "2м2": 1, "2м1": 1})
+        self.assertEqual(full_list_keys([first, second, third], need), {"1м1", "2м2"})
 
     def test_two_classes_in_one_message(self):
         self.assertEqual([k for k, _ in find_lists("1б\n1.Ли\n2.Ким\n2а\n1.Петров")], ["1б", "2а"])

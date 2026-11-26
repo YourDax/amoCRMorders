@@ -1,6 +1,7 @@
 """Название сделки: класс без пробела и со строчной буквой («6 Ж» → «6ж»)."""
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from excel_reader import KINDERGARTEN, SCHOOL, deal_name, norm_class  # noqa: E402
+from excel_reader import KINDERGARTEN, SCHOOL, deal_name, norm_class, progress_key  # noqa: E402
 
 
 class DealName(unittest.TestCase):
@@ -24,7 +25,42 @@ class DealName(unittest.TestCase):
         self.assertEqual(deal_name("6 Ж", "Под_18-сп1", SCHOOL, normalize=False), "6 Ж Под_18-сп1")
 
 
+    def test_progress_reuses_saved_numbered_class_in_the_same_pipeline(self):
+        old_key = json.dumps(["школа", r"1м\1 лицей"], ensure_ascii=False)
+        progress = {old_key: {"status": "ok"}}
+        self.assertEqual(progress_key(progress, "1М/1 Лицей", "Школа"), old_key)
+        self.assertNotEqual(progress_key(progress, "1М/1 Лицей", "Другая"), old_key)
+        self.assertNotEqual(progress_key(progress, "1м2 Лицей", "Школа"), old_key)
+
+
 class ImportProgress(unittest.TestCase):
+    def test_import_matches_numbered_classes_with_max_keys(self):
+        import openpyxl
+
+        import app
+        import history
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(app, "PROGRESS", root / "progress.json"), \
+                    patch.object(app, "UPLOADS", root / "uploads"), \
+                    patch.object(app, "S", app.State()), \
+                    patch.object(history, "FILE", root / "history.json"):
+                workbook = openpyxl.Workbook()
+                sheet = workbook.active
+                sheet.append(["Школа: Лицей"])
+                sheet.append(["Класс", "ФИО КР", "Телефон КР"])
+                for klass in (r"1м\1", "2м2", "2м1"):
+                    sheet.append([klass, "Иванова Анна", "+79990000001"])
+                data = io.BytesIO()
+                workbook.save(data)
+                data.seek(0)
+                response = app.app.test_client().post("/api/parse", data={"file": (data, "a.xlsx")})
+                self.assertEqual(response.status_code, 200)
+                deals = response.get_json()["deals"]
+                self.assertEqual([d["klass"] for d in deals], [r"1м\1", "2м2", "2м1"])
+                self.assertEqual([app.roster_key(d) for d in deals], ["1м1", "2м2", "2м1"])
+
     def test_new_import_starts_fresh_and_history_resumes(self):
         import openpyxl
 

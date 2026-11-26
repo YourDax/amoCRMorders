@@ -25,13 +25,15 @@ from collections.abc import Set
 # латинские буквы, похожие на русские (часто печатают «5B» вместо «5В»)
 _LATIN = str.maketrans("abcehkmoptxy", "авсенкмортху")
 _WORDS_RE = re.compile(r"\b(класс\w*|кл|группа|гр|group|список\w*)\b\.?", re.I)
-_KEY_RE = re.compile(r"^\d{1,2}[а-я]{0,2}$")
+_SCHOOL_KEY_RE = re.compile(r"\d{1,2}[а-я]{1,2}\d{0,2}")
+_KEY_RE = re.compile(rf"(?:\d{{1,2}}|{_SCHOOL_KEY_RE.pattern})")
+_CLASS_LABEL = r"""\d{1,2}\s*[-–—]?\s*[«"']?[а-яёa-z]{1,2}[»"']?(?:\d{1,2}|\s*[/\\]\s*\d{1,2})?"""
 _TIME_RE = re.compile(r"^\s*(ред\.?\s*)?\d{1,2}:\d{2}(\s*(изменено|ред\.?))?\s*$", re.I)
 _ITEM_NO_RE = re.compile(r"^\s*\d{1,3}\s*[.)\-–:]\s*\S")  # «10.Ли», «3) Иванов» — ребёнок, не класс
 _BARE_ITEM_RE = re.compile(r"^\s*\d{1,3}\s+(?=[А-ЯЁA-Z][а-яёa-z])")
 # «4в Сизинцева София», «3 «В»: Антонов» — класс в начале строки и текст после него
 _INLINE_RE = re.compile(
-    r"^\s*(\d{1,2})\s*[-–]?\s*[«\"']?([А-Яа-яЁёA-Za-z]{1,2})[»\"']?"
+    rf"^\s*({_CLASS_LABEL})"
     r"(?:\s*(?:класс\w*|кл\.?))?(?=[\s,:;.\-–])[\s,:;.\-–]+(\S.*)$", re.I)
 
 
@@ -44,7 +46,8 @@ def class_key(text: str) -> str:
     s = _WORDS_RE.sub(" ", s)
     s = re.sub(r"[\s\-–—_.,:;\"'«»“”„()№]+", "", s)
     s = s.translate(_LATIN)
-    return s if _KEY_RE.match(s) else ""
+    s = re.sub(r"(?<=[а-я])[/\\](?=\d{1,2}$)", "", s)
+    return s if _KEY_RE.fullmatch(s) else ""
 
 
 _GROUP_PREFIX = re.compile(r"^(?:гр\.\s*|(?:гр|групп[аыуе]|group)\b[\s:№.]+)", re.I)
@@ -53,7 +56,7 @@ _GROUP_NAME = re.compile(r"[\w]+(?:[\s.‑–—'-]+[\w]+)*", re.UNICODE)
 
 
 def is_school_class(key: str) -> bool:
-    return bool(re.fullmatch(r"\d{1,2}[а-я]{1,2}", key))
+    return bool(_SCHOOL_KEY_RE.fullmatch(key))
 
 
 def group_key(text: str) -> str:
@@ -78,7 +81,7 @@ def _counted_header_key(line: str, need: Set[str]) -> str:
 
 _PHOTO_HEADER_RE = re.compile(
     r"^(?:участники\s+(?:[а-яё-]+\s+)*фотопроекта\s+от\s+|(?:[а-яё-]+\s+)*фотосессия\s+)"
-    r"(\d{1,2}\s*[-–—]?\s*[«\"\x27]?[а-яёa-z]{1,2}[»\"\x27]?(?:\s+класс)?)\s*[:.]?$",
+    rf"({_CLASS_LABEL}(?:\s+класс)?)\s*[:.]?$",
     re.I,
 )
 
@@ -113,7 +116,7 @@ def people(line: str) -> int:
     marked = bool(re.match(r"^(?:\d+[.)\-:]|[•*–—-])", line))
     line = re.sub(r"^(?:\d+[.)\-:]|[•*–—-])\s*", "", line)
     line = _BARE_ITEM_RE.sub("", line)
-    line = re.sub(r"\s+\d{1,2}\s*[а-яёa-z]{1,2}$", "", line, flags=re.I)
+    line = re.sub(rf"\s+{_CLASS_LABEL}$", "", line, flags=re.I)
     parts = re.split(r"[,;]|\s+(?:и|с\s+(?:братом|сестрой))\s+", line, flags=re.I)
     return sum(bool(re.fullmatch(r"[А-ЯЁA-Z][\w’'-]*(?:\s+[А-ЯЁA-Z][\w.’'-]*){0,3}[.]?", part.strip(), flags=re.I if marked else 0)) for part in parts)
 
@@ -121,7 +124,7 @@ def people(line: str) -> int:
 def _inline(line: str, need: Set[str]):
     match = _INLINE_RE.match(line)
     if match:
-        return class_key(match[1] + match[2]), match[3]
+        return class_key(match[1]), match[2]
     split = re.match(r"^(.+?)\s*[:—–]\s*(\S.*)$", line)
     if split and not _ITEM_NO_RE.match(line):
         key = _header_key(split[1], need)

@@ -82,19 +82,23 @@ def deal_identity(name: str) -> str:
 def progress_key(progress, name, pipeline):
     import json
     identity = deal_identity(name)
-    key = json.dumps([pipeline.strip().casefold(), identity], ensure_ascii=False)
+    pipeline_key = pipeline.strip().casefold()
+    key = json.dumps([pipeline_key, identity], ensure_ascii=False)
     if key in progress:
         return key
-    if not pipeline:
-        # CLI без явной воронки сохраняет совместимость со старыми карточками.
+    # До распознавания цифровых суффиксов ключ мог хранить исходное написание.
+    if not pipeline_key or re.search(r"\b\d{1,2}[а-я]{1,2}\d{1,2}\b", identity):
         for saved in progress:
-            if saved.startswith("["):
-                try:
-                    _, other = json.loads(saved)
-                except (TypeError, ValueError):
-                    continue
-                if other == identity:
-                    return saved
+            if not saved.startswith("["):
+                continue
+            try:
+                saved_pipeline, other = json.loads(saved)
+            except (TypeError, ValueError):
+                continue
+            if pipeline_key and saved_pipeline != pipeline_key:
+                continue
+            if isinstance(other, str) and deal_identity(other) == identity:
+                return saved
     # Старый формат не хранил воронку. Сохраняем защиту старых карточек.
     for old in progress:
         if not old.startswith("[") and deal_identity(old) == identity:
