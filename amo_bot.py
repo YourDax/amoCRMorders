@@ -515,7 +515,19 @@ class AmoBot:
                 raise RuntimeError(f"Не удалось проверить тег «{tag}» в amoCRM (HTTP {result['status']})")
             return result.get("found", False)
 
+        def persisted():
+            if has_tag():
+                return True
+            self.wait(300)
+            return False
+
         if has_tag():
+            return
+
+        # После первого сохранения ответ API может отставать от карточки. Проверяем
+        # тег на заново открытой сделке, прежде чем пытаться добавить его повторно.
+        self.open_deal(self.deal_url())
+        if self._wait_until(persisted, min(self.timeout, 2000)):
             return
 
         self.fill_deal_tag(tag)
@@ -523,12 +535,6 @@ class AmoBot:
         if save.is_visible():
             # Карточка уже существует, поэтому сохранение тега можно безопасно повторить.
             self._save_and_wait(new_deal=False)
-
-        def persisted():
-            if has_tag():
-                return True
-            self.wait(300)
-            return False
 
         if not self._wait_until(persisted, min(self.timeout, 5000)):
             raise RuntimeError(f"В сохранённой сделке отсутствует тег «{tag}»")
