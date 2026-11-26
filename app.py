@@ -914,14 +914,14 @@ def main():
 
     threading.Thread(target=worker, daemon=True).start()
     print(f"Приложение работает: {url}")
-    if ready_path:
-        Path(ready_path).touch()
     if "--no-open" not in sys.argv:
         startup_status("Открываю окно программы…")
 
         def start_window():
             try:
                 window_opened = open_ui(url)
+                if ready_path:
+                    Path(ready_path).touch()
             finally:
                 close_startup_window()
             if window_opened:
@@ -930,6 +930,8 @@ def main():
                 idle_watchdog()
         threading.Thread(target=start_window, daemon=True).start()
     else:
+        if ready_path:
+            Path(ready_path).touch()
         close_startup_window()
     server.serve_forever()
 

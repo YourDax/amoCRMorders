@@ -95,10 +95,19 @@ def stage_release(root, current, progress):
         temporary = Path(directory)
         archive = temporary / UPDATE_ASSET
         download(asset, archive, progress)
-        progress("Распаковываю обновление…")
+        progress("Распаковываю обновление… 0%")
         staging = temporary / "app"
         with ZipFile(archive) as package:
-            package.extractall(staging)
+            members = package.infolist()
+            total = sum(member.file_size for member in members)
+            extracted = percent = 0
+            for member in members:
+                package.extract(member, staging)
+                extracted += member.file_size
+                unpacked = extracted * 100 // total if total else 100
+                if unpacked != percent:
+                    percent = unpacked
+                    progress(f"Распаковываю обновление… {percent}%")
         if not (staging / APP_EXE).is_file() or not (staging / "_internal").is_dir():
             raise OSError("Update archive does not contain the application")
         staging.rename(target)

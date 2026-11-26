@@ -53,6 +53,7 @@ splash = Splash(
     text_font="Segoe UI",
     text_color="#334155",
     text_default="Запускаю программу…",
+    center="active",
 )
 pyz = PYZ(a.pure)
 exe = EXE(
