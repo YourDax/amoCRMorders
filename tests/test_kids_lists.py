@@ -113,6 +113,20 @@ class Messages(unittest.TestCase):
     def test_two_classes_in_one_message(self):
         self.assertEqual([k for k, _ in find_lists("1б\n1.Ли\n2.Ким\n2а\n1.Петров")], ["1б", "2а"])
 
+    def test_separate_class_messages_with_lowercase_given_names(self):
+        first = "1г:\nИванова анна\nПетров иван\nСидорова мария"
+        second = "1н:\nОрлова елена \nКим мирослав\nВолкова настя"
+        comments = "1а:\nНа фотосессию\nВремя уточним\nСнимаются завтра"
+        need = {"1г", "1н", "1а"}
+
+        messages = [first, second, comments, "1г Пришлите фото"]
+        self.assertEqual(full_list_keys(messages, need), {"1г", "1н"})
+        self.assertEqual(collect_lists(messages, need),
+                         {"1г": first, "1н": second.replace("елена ", "елена")})
+        self.assertEqual(count_kids(first, need), 3)
+        self.assertEqual(count_kids(second, need), 3)
+        self.assertEqual(count_kids(comments, need), 0)
+
     def test_class_header_with_count(self):
         msg = "2к, 3 чел:\nПервый Ребёнок\nВторой Ребёнок (невидимки)\nТретий Ребёнок"
         self.assertEqual(parse_message(msg), [("2к", msg, True)])

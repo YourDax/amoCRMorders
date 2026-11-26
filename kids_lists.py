@@ -45,6 +45,13 @@ _INLINE_RE = re.compile(
 
 
 _INVISIBLE_RE = re.compile(r"[\u200b-\u200f\u2060\ufe0e\ufe0f\ufeff]")
+_COUNT_COMMENT_RE = re.compile(
+    r"^(?:спасибо|здравствуйте|добрый|завтра|сегодня|готово|понятно|вопрос|итого|всего|сбор|список|"
+    r"привет|хорошо|идут|снимаются|количество|время|напоминание|пожалуйста|на\s+фотосессию|"
+    r"на\s+съ[её]мку|фотосессия)\b", re.I,
+)
+_NAME_WORD = r"[А-ЯЁа-яёA-Za-z]+(?:[‐‑’'-][А-ЯЁа-яёA-Za-z]+)*"
+_PERSON_RE = re.compile(rf"{_NAME_WORD}\.?(?:\s+{_NAME_WORD}\.?){{0,3}}")
 
 
 def class_key(text: str) -> str:
@@ -120,21 +127,25 @@ def _header_key(line: str, need: Set[str]) -> str:
     return ""
 
 
-def people(line: str) -> int:
+def people(line: str, *, roster: bool = False) -> int:
     """Число похожих на имена записей, без пояснений и отсутствующих."""
     line = re.sub(r"\([^)]*\)", "", line).strip()
     if re.search(r"\?|(?:^|\s)(?:нет|не будет|не будут|отсутству\w*|не прид[её]т|отказ(?:ался|алась|ались))(?:\s|$|[.,:])", line, re.I):
-        return 0
-    if re.match(r"^(?:спасибо|здравствуйте|добрый|завтра|сегодня|готово|понятно|вопрос|итого|всего|сбор|список|привет|хорошо)\b", line, re.I):
         return 0
     marker = _ITEM_NO_RE.match(line) or _BULLET_ITEM_RE.match(line)
     if marker:
         line = line[marker.end():]
     line = _BARE_ITEM_RE.sub("", line)
+    if _COUNT_COMMENT_RE.match(line):
+        return 0
     line = re.sub(rf"\s+{_CLASS_LABEL}$", "", line, flags=re.I)
     line, siblings = _ANONYMOUS_SIBLING_RE.subn("", line)
-    parts = re.split(r"[,;+]|\s+(?:и|с\s+(?:братом|сестрой))\s+", line, flags=re.I)
-    named = sum(bool(re.fullmatch(r"[А-ЯЁA-Z][\w’'-]*(?:\s+[А-ЯЁA-Z][\w.’'-]*){0,3}[.]?", part.strip(), flags=re.I if marker else 0)) for part in parts)
+    parts = (part.strip() for part in re.split(r"[,;+]|\s+(?:и|с\s+(?:братом|сестрой))\s+", line, flags=re.I))
+    named = sum(
+        1 for part in parts if _PERSON_RE.fullmatch(part) and (
+            marker is not None or (part[0].isupper() and (roster or all(word[0].isupper() for word in part.split())))
+        )
+    )
     return named + siblings if named else 0
 
 
@@ -157,7 +168,7 @@ def parse_message(text: str, need: Set[str] = frozenset()) -> list[tuple[str, st
     for i, line in enumerate(lines):
         if full and _BARE_ITEM_RE.match(line) and not _BARE_COUNT_RE.fullmatch(line):
             body.append(line)
-            evidence += people(line)
+            evidence += people(line, roster=True)
             continue
         header = _header_key(line, need) or _counted_header_key(line, need)
         inline = None if header or (full and _ITEM_NO_RE.match(line)) else _inline(line, need)
@@ -170,7 +181,7 @@ def parse_message(text: str, need: Set[str] = frozenset()) -> list[tuple[str, st
             evidence = people(inline[1]) if inline_key else 0
         elif key:
             body.append(line)
-            evidence += people(line)
+            evidence += people(line, roster=full)
     if key and evidence:
         out.append((key, "\n".join(body), full))
     return out
@@ -183,7 +194,7 @@ def _row_span(text: str) -> tuple[int, int] | None:
         if not line.strip():
             continue
         match = _ITEM_NO_RE.match(line) or _BARE_ITEM_RE.match(line)
-        if not match or not people(line):
+        if not match or not people(line, roster=True):
             return None
         number = int(match[1])
         if last is not None and number != last + 1:
@@ -208,7 +219,7 @@ def _joined_lists(messages, need: Set[str]):
             clean_heading = _INVISIBLE_RE.sub("", heading).lstrip(_HEADER_MARKS)
             explicit_list = _LIST_HEADER_RE.match(clean_heading) or _BARE_COUNT_RE.fullmatch(clean_heading)
             plain_list = len(rows) > 1 and all(
-                _PERSON_RE.fullmatch(row) and people(row) == 1 and (explicit_list or " " in row)
+                _PERSON_RE.fullmatch(row) and people(row, roster=True) == 1 and (explicit_list or " " in row)
                 for row in rows
             )
             if (_ITEM_NO_RE.match(following) or _BARE_ITEM_RE.match(following)
@@ -244,7 +255,7 @@ def _combine_full_lists(bodies: list[str]) -> str:
     comments = {}
     for body in bodies:
         for line in body.splitlines()[1:]:
-            if people(line):
+            if people(line, roster=True):
                 marker = _ITEM_NO_RE.match(line) or _BARE_ITEM_RE.match(line) or _BULLET_ITEM_RE.match(line)
                 name = line[marker.end():] if marker else line
                 identity = _ANONYMOUS_SIBLING_RE.sub("", re.sub(r"\([^)]*\)", "", name)).strip(" .")
@@ -304,10 +315,6 @@ def merge_history(history: list[str], older: list[str]) -> list[str]:
     return older + history
 
 
-_COUNT_COMMENT_RE = re.compile(r"^(?:идут\b|снимаются\b|список\b|всего\b|итого\b|количество\b|на\s+фотосессию\b)", re.I)
-_PERSON_RE = re.compile(r"[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*(?:\s+[А-ЯЁA-Zа-яёa-z]+(?:[-'][А-ЯЁA-Zа-яёa-z]+)*){0,2}")
-
-
 def count_kids(body: str, need: Set[str] = frozenset()) -> int:
     total = 0
     for _, block, full in parse_message(body, need):
@@ -318,5 +325,5 @@ def count_kids(body: str, need: Set[str] = frozenset()) -> int:
                 total += people(inline[1])
                 started = True
             elif started and i:
-                total += people(line)
+                total += people(line, roster=full)
     return total
